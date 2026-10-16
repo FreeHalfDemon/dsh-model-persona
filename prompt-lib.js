@@ -208,6 +208,69 @@ export function normalizeModelCatalog(raw) {
 }
 
 /**
+ * 从一次网页抓取的结果里**提取可用作提示词的文本**。
+ *
+ * 契约来自官方 docs/subsystems/web.md（逐字核实）：
+ *   WebFetchResult = { url, statusCode, body: {kind:'html'|'text', content}, truncated }
+ * ⚠️ 非 2xx 状态码**不是**异常，是正常 result —— 必须显式判 statusCode，
+ *    否则会把 404 页面的「Not Found」当成提示词存进库。
+ *
+ * HTML 走「去标签 + 压空白」的朴素处理：不引 HTML 解析器（零依赖是硬约束），
+ * 对「从网页复制一段提示词」这个用途够用。text/plain 直接透传。
+ *
+ * @returns {{ok:true, text:string, truncated:boolean} | {ok:false, error:string}}
+ */
+export function extractFetchedPrompt(result, opts = {}) {
+  const maxChars = Number.isFinite(opts.maxChars) && opts.maxChars > 0 ? opts.maxChars : 200000
+  if (!isPlainObject(result)) return { ok: false, error: '抓取结果格式不对' }
+
+  const status = Number(result.statusCode)
+  if (!Number.isFinite(status)) return { ok: false, error: '抓取结果缺少状态码' }
+  if (status < 200 || status >= 300) return { ok: false, error: `目标返回 HTTP ${status}` }
+
+  const body = result.body
+  if (!isPlainObject(body) || typeof body.content !== 'string') {
+    return { ok: false, error: '抓取结果没有可读正文' }
+  }
+
+  let text = body.content
+  if (body.kind === 'html') text = stripHtml(text)
+  text = text.replace(/\r\n?/g, '\n').trim()
+
+  if (!text) return { ok: false, error: '抓到的正文是空的' }
+
+  let truncated = result.truncated === true
+  if (text.length > maxChars) {
+    text = text.slice(0, maxChars)
+    truncated = true
+  }
+  return { ok: true, text, truncated }
+}
+
+/** 朴素去标签：丢 script/style，标签换空格，压掉多余空行 */
+function stripHtml(html) {
+  return String(html)
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<\/(p|div|li|h[1-6]|tr|br)>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&amp;/gi, '&')
+    .replace(/[ \t\f\v]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .split('\n')
+    .map((l) => l.trim())
+    .join('\n')
+    .trim()
+}
+
+/**
  * 读提示词库（独立文件，与 config.json 分离）。
  *
  * 为什么分离：库是「可复用的素材」，映射是「哪个模型用哪条」。

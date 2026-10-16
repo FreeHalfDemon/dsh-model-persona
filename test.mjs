@@ -501,6 +501,7 @@ import {
   findPrompt,
   parseModelCatalog,
   readLibrary,
+  extractFetchedPrompt,
   writeLibrary,
 } from './prompt-lib.js'
 
@@ -1153,4 +1154,99 @@ test('writeLibrary：Windows 风格路径也能正确取目录', () => {
   fs.mkdirSync = (d) => dirs.push(d)
   writeLibrary(fs, 'C:\\some\\dir\\prompts.json', [])
   assert.deepEqual(dirs, ['C:\\some\\dir'], '反斜杠路径要能取对目录')
+})
+
+// ── extractFetchedPrompt（v4 网上下载提示词） ────────────────
+
+
+const html = (s) => ({ url: 'https://example.invalid/p', statusCode: 200, body: { kind: 'html', content: s }, truncated: false })
+const text = (s) => ({ url: 'https://example.invalid/p', statusCode: 200, body: { kind: 'text', content: s }, truncated: false })
+
+test('★ extractFetchedPrompt：text/plain 直接透传', () => {
+  const r = extractFetchedPrompt(text('你是简洁的工程助手。'))
+  assert.equal(r.ok, true)
+  assert.equal(r.text, '你是简洁的工程助手。')
+})
+
+test('★ extractFetchedPrompt：HTML 去标签', () => {
+  const r = extractFetchedPrompt(html('<h1>标题</h1><p>正文一</p><p>正文二</p>'))
+  assert.equal(r.ok, true)
+  assert.ok(r.text.includes('标题'), r.text)
+  assert.ok(r.text.includes('正文一'))
+  assert.ok(!r.text.includes('<'), '不应残留标签')
+})
+
+test('★ extractFetchedPrompt：script/style 内容被丢掉', () => {
+  const r = extractFetchedPrompt(html('<script>var evil=1</script><style>.a{color:red}</style><p>真内容</p>'))
+  assert.ok(!r.text.includes('evil'), 'script 内容必须丢掉')
+  assert.ok(!r.text.includes('color'), 'style 内容必须丢掉')
+  assert.ok(r.text.includes('真内容'))
+})
+
+test('★ extractFetchedPrompt：HTML 实体被解码', () => {
+  const r = extractFetchedPrompt(html('<p>a &amp; b &lt;tag&gt; &quot;q&quot; &#39;s&#39;</p>'))
+  assert.ok(r.text.includes('a & b'), r.text)
+  assert.ok(r.text.includes('<tag>'))
+  assert.ok(r.text.includes('"q"'))
+  assert.ok(r.text.includes("'s'"))
+})
+
+test('★ extractFetchedPrompt：非 2xx 被当作错误（404 页面不能当提示词）', () => {
+  for (const code of [301, 404, 500, 503]) {
+    const r = extractFetchedPrompt({ url: 'u', statusCode: code, body: { kind: 'text', content: 'Not Found' }, truncated: false })
+    assert.equal(r.ok, false, `${code} 应判失败`)
+    assert.match(r.error, new RegExp(String(code)))
+  }
+})
+
+test('extractFetchedPrompt：缺状态码被拒', () => {
+  assert.equal(extractFetchedPrompt({ body: { kind: 'text', content: 'x' } }).ok, false)
+})
+
+test('★ extractFetchedPrompt：空正文被拒（别把空串存进库）', () => {
+  assert.equal(extractFetchedPrompt(text('   ')).ok, false)
+  assert.equal(extractFetchedPrompt(html('<p></p>')).ok, false)
+  assert.equal(extractFetchedPrompt(html('')).ok, false)
+})
+
+test('extractFetchedPrompt：body 缺失或形态不对被拒', () => {
+  assert.equal(extractFetchedPrompt({ statusCode: 200 }).ok, false)
+  assert.equal(extractFetchedPrompt({ statusCode: 200, body: null }).ok, false)
+  assert.equal(extractFetchedPrompt({ statusCode: 200, body: { kind: 'text' } }).ok, false)
+  assert.equal(extractFetchedPrompt(null).ok, false)
+  assert.equal(extractFetchedPrompt('str').ok, false)
+})
+
+test('★ extractFetchedPrompt：超长正文被截断并标记', () => {
+  const r = extractFetchedPrompt(text('x'.repeat(500)), { maxChars: 100 })
+  assert.equal(r.ok, true)
+  assert.equal(r.text.length, 100)
+  assert.equal(r.truncated, true, '截断了就要标记出来')
+})
+
+test('extractFetchedPrompt：未截断时 truncated 为 false', () => {
+  assert.equal(extractFetchedPrompt(text('短')).truncated, false)
+})
+
+test('extractFetchedPrompt：上游自己标了 truncated 要透传', () => {
+  const r = extractFetchedPrompt({ statusCode: 200, body: { kind: 'text', content: '正文' }, truncated: true })
+  assert.equal(r.truncated, true)
+})
+
+test('extractFetchedPrompt：CRLF 归一成 LF', () => {
+  const r = extractFetchedPrompt(text('第一行\r\n第二行\r第三行'))
+  assert.ok(!r.text.includes('\r'))
+  assert.equal(r.text.split('\n').length, 3)
+})
+
+test('extractFetchedPrompt：HTML 里连续的空白被压缩', () => {
+  const r = extractFetchedPrompt(html('<p>a</p>\n\n\n\n\n<p>b</p>'))
+  assert.ok(!/\n{3,}/.test(r.text), '不该有 3 个以上连续换行')
+})
+
+test('extractFetchedPrompt：不改入参', () => {
+  const input = html('<p>x</p>')
+  const snap = JSON.stringify(input)
+  extractFetchedPrompt(input)
+  assert.equal(JSON.stringify(input), snap)
 })

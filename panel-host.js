@@ -91,6 +91,8 @@ export function registerPanelRoutes(scope, deps) {
     // 库读写由调用方注入：panel-host 不直接碰 fs，便于单测与替换
     readLibrary = () => [],
     writeLibrary = () => ({ ok: true }),
+    // 网上抓取提示词：调用方注入（内部用 ctx.web.fetch）。null = 本机没这能力
+    fetchPrompt = null,
     warn = () => {},
   } = deps
 
@@ -276,6 +278,60 @@ export function registerPanelRoutes(scope, deps) {
     )
   } catch (e) {
     warn(`${LOG} 注册 /library 失败：${(e && e.message) || e}`)
+  }
+
+  // ②d 网上下载提示词（v4）
+  //
+  // 走官方 ctx.web.fetch（契约见 docs/subsystems/web.md）：WebFetchRequest 只有 url，
+  // WebFetchResult 带 statusCode —— ⚠️ 非 2xx 是正常 result 不是异常，
+  // 必须显式判，否则 404 页面的「Not Found」会被当成提示词存进库。
+  //
+  // ctx.web 是**可选服务**（本机装了 4 个 provider，但别的 profile 可能没有），
+  // 拿不到就明确报错让用户自己粘贴，不做静默失败。
+  try {
+    disposers.push(
+      webServer.register({
+        kind: 'exact',
+        path: `${PREFIX}/fetch`,
+        handler: guard(async (req, res) => {
+          if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          if (req.headers['x-model-persona'] !== '1') {
+            return sendJson(res, 403, { ok: false, error: 'missing X-Model-Persona header' })
+          }
+          const ctype = String(req.headers['content-type'] || '')
+          if (!ctype.includes('application/json')) {
+            return sendJson(res, 415, { ok: false, error: 'content-type must be application/json' })
+          }
+          const raw = await readBody(req)
+          let parsed
+          try {
+            parsed = JSON.parse(raw)
+          } catch {
+            return sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' })
+          }
+          const url = parsed && typeof parsed.url === 'string' ? parsed.url.trim() : ''
+          if (!/^https?:\/\//i.test(url)) {
+            return sendJson(res, 400, { ok: false, error: '只接受 http/https 链接' })
+          }
+          if (typeof fetchPrompt !== 'function') {
+            return sendJson(res, 503, {
+              ok: false,
+              error: '本机没有可用的联网抓取服务，请手动粘贴提示词',
+            })
+          }
+          try {
+            const out = await fetchPrompt(url)
+            if (!out.ok) return sendJson(res, 400, { ok: false, error: out.error })
+            sendJson(res, 200, { ok: true, text: out.text, truncated: out.truncated === true })
+          } catch (e) {
+            // 抓取失败是外部原因，用 502 区分「我们没坏，是对面取不到」
+            sendJson(res, 502, { ok: false, error: `抓取失败：${(e && e.message) || e}` })
+          }
+        }),
+      }),
+    )
+  } catch (e) {
+    warn(`${LOG} 注册 /fetch 失败：${(e && e.message) || e}`)
   }
 
   // ③ 真实装配预览：调 ctx.systemPrompt.assemble() 拿真结果，逐段列出来

@@ -39,6 +39,7 @@ import {
   normalizeModelCatalog,
   readLibrary as libReadLibrary,
   writeLibrary as libWriteLibrary,
+  extractFetchedPrompt,
 } from './prompt-lib.js'
 import { summarizeAssembly } from './core.js'
 
@@ -164,6 +165,28 @@ export function apply(ctx) {
   } catch (e) {
     warn(`${LOG} 注入 sessionController 失败（下拉框不可用）：${(e && e.message) || e}`)
   }
+
+  /**
+   * ⑥ 网上抓取提示词（v4）。可选依赖 ctx.web —— 它是**可选服务**：
+   * 本机装了 4 个 provider，但别的 profile 可能一个都没有。
+   * 拿不到就让面板明确提示「手动粘贴」，不做静默失败。
+   */
+  let webService = null
+  try {
+    ctx.inject(['web'], (scope) => {
+      const svc = scope && scope.web
+      if (svc && typeof svc.fetch === 'function') webService = svc
+    })
+  } catch {
+    /* 没有就算了，面板会给替代路径 */
+  }
+
+  const fetchPrompt = webService
+    ? async (url) => {
+        const result = await webService.fetch({ url })
+        return extractFetchedPrompt(result)
+      }
+    : null
 
   /**
    * ④ 真实装配预览（v4）。
@@ -294,6 +317,7 @@ export function apply(ctx) {
           assemblePreview,
           readLibrary,
           writeLibrary,
+          fetchPrompt,
           warn,
         })
         scope.effect(() => dispose, 'dsh-model-persona.panel-routes()')

@@ -82,6 +82,11 @@ window.__ModuleLoader__.load({
       libraryBuiltin: '内置',
       edit: '编辑',
       cancel: '取消',
+      importUrl: '从网址导入',
+      importUrlHint: 'https://…（抓回正文填进上面的框，不自动保存）',
+      imported: '已抓取，检查内容后再保存',
+      importTruncated: '已抓取（内容过长被截断），检查后再保存',
+      importFail: '导入失败',
       useCurrent: '用当前模型',
       loadFail: '读不到插件状态',
       advanced: '高级选项',
@@ -146,6 +151,11 @@ window.__ModuleLoader__.load({
       libraryBuiltin: 'Built-in',
       edit: 'Edit',
       cancel: 'Cancel',
+      importUrl: 'Import from URL',
+      importUrlHint: 'https://… (fetched text fills the box above; not saved automatically)',
+      imported: 'Fetched. Review before saving.',
+      importTruncated: 'Fetched (truncated). Review before saving.',
+      importFail: 'Import failed',
       useCurrent: 'Use current model',
       loadFail: 'Cannot read plugin state',
       advanced: 'Advanced',
@@ -247,6 +257,16 @@ window.__ModuleLoader__.load({
       const j = await r.json()
       if (!j.ok) throw new Error(j.error || 'library failed')
       return Array.isArray(j.library) ? j.library : []
+    }
+    async function fetchPromptFromUrl(url) {
+      const r = await fetch(`${API}/fetch`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-model-persona': '1' },
+        body: JSON.stringify({ url }),
+      })
+      const j = await r.json()
+      if (!j.ok) throw new Error(j.error || 'fetch failed')
+      return { text: j.text || '', truncated: j.truncated === true }
     }
     async function postLibrary(payload) {
       const r = await fetch(`${API}/library`, {
@@ -359,6 +379,26 @@ window.__ModuleLoader__.load({
           setMsg({ kind: 'ok', text: t('saved') })
         } catch (e) {
           setMsg({ kind: 'err', text: `${t('failed')}: ${e.message}` })
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      /** 从网址抓一段文本填进编辑区（不自动入库，用户先看再存） */
+      const onImportUrl = async () => {
+        const url = (libDraft && libDraft.url) || ''
+        if (!url.trim()) return
+        setBusy(true)
+        setMsg(null)
+        try {
+          const r = await fetchPromptFromUrl(url.trim())
+          setLibDraft((d) => ({ ...d, text: r.text }))
+          setMsg({
+            kind: 'ok',
+            text: r.truncated ? t('importTruncated') : t('imported'),
+          })
+        } catch (e) {
+          setMsg({ kind: 'err', text: `${t('importFail')}: ${e.message}` })
         } finally {
           setBusy(false)
         }
@@ -707,6 +747,24 @@ window.__ModuleLoader__.load({
                   value: libDraft.text,
                   onChange: (e) => setLibDraft({ ...libDraft, text: e.target.value }),
                 }),
+                // 从网址导入：走 Host 的 ctx.web.fetch，抓回来的正文直接填进编辑区，
+                // 用户先看一眼再决定存不存 —— 不自动入库。
+                h(
+                  'div',
+                  { className: 'dmp-row' },
+                  h('input', {
+                    type: 'text',
+                    value: libDraft.url || '',
+                    placeholder: t('importUrlHint'),
+                    'aria-label': t('importUrl'),
+                    onChange: (e) => setLibDraft({ ...libDraft, url: e.target.value }),
+                  }),
+                  h(
+                    'button',
+                    { disabled: busy || !(libDraft.url || '').trim(), onClick: onImportUrl },
+                    t('importUrl'),
+                  ),
+                ),
                 h(
                   'div',
                   { className: 'dmp-row' },
