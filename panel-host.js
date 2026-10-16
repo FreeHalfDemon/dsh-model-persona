@@ -24,6 +24,7 @@ import {
   validateConfigInput,
   buildPanelState,
   writeConfigAtomic,
+  summarizeAssembly,
 } from './core.js'
 
 const PREFIX = '/model-persona'
@@ -85,6 +86,7 @@ export function registerPanelRoutes(scope, deps) {
     readConfig,
     modelCatalog = { models: [], source: 'none', error: '' },
     setCatalog = () => {},
+    assemblePreview = null,
     warn = () => {},
   } = deps
 
@@ -217,7 +219,11 @@ export function registerPanelRoutes(scope, deps) {
     warn(`${LOG} 注册 /catalog 失败：${(e && e.message) || e}`)
   }
 
-  // ③ 预览：给定模型（默认用当前真实模型）会注入什么
+  // ③ 真实装配预览：调 ctx.systemPrompt.assemble() 拿真结果，逐段列出来
+  //
+  // v3 的预览只是「把配置重算一遍」，用户看不到真实系统提示词的形状。
+  // 现在给真东西：有哪些段、顺序、字符数、自己的人格段插在哪、
+  // replace 模式下哪些段被换掉了。拿不到 assemble 就降级回旧行为，绝不抛。
   try {
     disposers.push(
       webServer.register({
@@ -235,7 +241,24 @@ export function registerPanelRoutes(scope, deps) {
               model = ''
             }
           }
-          sendJson(res, 200, { ok: true, state: buildPanelState(cfg, model) })
+          const base = { ok: true, state: buildPanelState(cfg, model) }
+
+          // 真装配：可选，失败就只回旧字段
+          if (typeof assemblePreview !== 'function') {
+            sendJson(res, 200, { ...base, assembly: null, assemblyError: 'assemble 不可用' })
+            return
+          }
+          try {
+            const summary = await assemblePreview(model)
+            sendJson(res, 200, { ...base, assembly: summary, assemblyError: '' })
+          } catch (e) {
+            // 真装配失败不该让预览整个 500 —— 旧字段仍然可用
+            sendJson(res, 200, {
+              ...base,
+              assembly: null,
+              assemblyError: (e && e.message) || 'assemble failed',
+            })
+          }
         }),
       }),
     )

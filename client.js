@@ -60,6 +60,15 @@ window.__ModuleLoader__.load({
       fallback: '兜底文本（都没命中时用）',
       preview: '实时预览',
       previewHint: '这段就是当前模型会注入的文本。',
+      assembly: '真实装配预览',
+      assemblySections: '段数',
+      assemblyChars: '总字符',
+      assemblyTools: '工具数',
+      assemblyOwn: '本插件段',
+      assemblyOwnNone: '本插件段未注入',
+      assemblyReplaced: '已整体替换',
+      assemblyHint: '★ 标记的是本插件注入的段。字符数为该段在系统提示词里占的长度。',
+      assemblyFail: '真实装配预览不可用',
       save: '保存',
       saving: '保存中…',
       saved: '已保存',
@@ -113,6 +122,15 @@ window.__ModuleLoader__.load({
       fallback: 'Fallback text (when nothing matches)',
       preview: 'Live preview',
       previewHint: 'This is exactly what the current model receives.',
+      assembly: 'Real assembly preview',
+      assemblySections: 'Sections',
+      assemblyChars: 'Total chars',
+      assemblyTools: 'Tools',
+      assemblyOwn: 'This plugin',
+      assemblyOwnNone: 'Not injected',
+      assemblyReplaced: 'Fully replaced',
+      assemblyHint: '★ marks the section this plugin injects. Chars is its length in the system prompt.',
+      assemblyFail: 'Real assembly preview unavailable',
       save: 'Save',
       saving: 'Saving…',
       saved: 'Saved',
@@ -198,6 +216,18 @@ window.__ModuleLoader__.load({
         catalogError: j.catalogError || '',
       }
     }
+    /**
+     * 真实装配摘要。单独一个路由：它是可选的、可能较慢、也可能失败
+     * （拿不到 systemPrompt.assemble 的 profile 里就没有）。
+     * 失败不该让整个面板加载失败，所以调用方各自 try/catch。
+     */
+    async function getAssembly(model) {
+      const q = model ? `?model=${encodeURIComponent(model)}` : ''
+      const r = await fetch(`${API}/preview${q}`, { headers: { accept: 'application/json' } })
+      const j = await r.json()
+      if (!j.ok) throw new Error(j.error || 'preview failed')
+      return { assembly: j.assembly || null, assemblyError: j.assemblyError || '' }
+    }
     async function saveConfig(cfg) {
       const r = await fetch(`${API}/config`, {
         method: 'POST',
@@ -246,6 +276,8 @@ window.__ModuleLoader__.load({
       const [showAdvanced, setShowAdvanced] = React.useState(false)
       const [libDraft, setLibDraft] = React.useState(null)
       const [catalogDraft, setCatalogDraft] = React.useState('')
+      const [assembly, setAssembly] = React.useState(null)
+      const [assemblyError, setAssemblyError] = React.useState('')
 
       const load = React.useCallback(async () => {
         try {
@@ -258,9 +290,26 @@ window.__ModuleLoader__.load({
         }
       }, [t])
 
+      // 真实装配预览：与 state 分开拉，失败不影响面板其余部分
+      const loadAssembly = React.useCallback(async (model) => {
+        try {
+          const r = await getAssembly(model)
+          setAssembly(r.assembly)
+          setAssemblyError(r.assemblyError)
+        } catch (e) {
+          setAssembly(null)
+          setAssemblyError(e.message)
+        }
+      }, [])
+
       React.useEffect(() => {
         load()
       }, [load])
+
+      // state 就绪后再拉装配摘要（它依赖当前模型 id）
+      React.useEffect(() => {
+        if (state && state.model) loadAssembly(state.model)
+      }, [state, loadAssembly])
 
       if (!bundle || !draft) {
         return h('div', { 'data-dmp': '' }, h('p', { className: 'dmp-sub' }, '…'))
@@ -314,6 +363,7 @@ window.__ModuleLoader__.load({
           }
           await saveConfig(payload)
           await load()
+          if (state && state.model) await loadAssembly(state.model)
           setMsg({ kind: 'ok', text: t('saved') })
         } catch (e) {
           setMsg({ kind: 'err', text: `${t('failed')}: ${e.message}` })
@@ -521,11 +571,47 @@ window.__ModuleLoader__.load({
           }),
         ),
 
-        // ⑤ 预览
+        // ⑤ 预览：上半是「本插件会注入什么」，下半是「真实装配出的系统提示词全貌」
         h('hr', { className: 'dmp-sep' }),
         h('span', { className: 'dmp-label' }, t('preview')),
         h('p', { className: 'dmp-sub' }, t('previewHint')),
         h('pre', { className: 'dmp-code' }, state.injectedText || '（空）'),
+
+        assembly &&
+          h(
+            'div',
+            { className: 'dmp-card' },
+            h('span', { className: 'dmp-label' }, t('assembly')),
+            h(
+              'div',
+              { className: 'dmp-row' },
+              h('span', { className: 'dmp-chip' }, `${t('assemblySections')}: ${assembly.sectionCount}`),
+              h('span', { className: 'dmp-chip' }, `${t('assemblyChars')}: ${assembly.totalChars}`),
+              h('span', { className: 'dmp-chip' }, `${t('assemblyTools')}: ${assembly.toolCount}`),
+              assembly.ownInjected
+                ? h('span', { className: 'dmp-chip' }, `${t('assemblyOwn')}: ${assembly.ownChars}`)
+                : h('span', { className: 'dmp-chip' }, t('assemblyOwnNone')),
+              assembly.replaced && h('span', { className: 'dmp-chip' }, t('assemblyReplaced')),
+            ),
+            h(
+              'div',
+              { className: 'dmp-field' },
+              ...assembly.sections.map((s, i) =>
+                h(
+                  'div',
+                  { key: i, className: 'dmp-librow' },
+                  h(
+                    'span',
+                    { className: 'dmp-libname', title: s.name },
+                    `${s.own ? '★ ' : ''}${s.name}`,
+                  ),
+                  h('span', { className: 'dmp-chip' }, `${s.chars}`),
+                ),
+              ),
+            ),
+            h('p', { className: 'dmp-sub' }, t('assemblyHint')),
+          ),
+        assemblyError && h('p', { className: 'dmp-sub' }, `${t('assemblyFail')}: ${assemblyError}`),
 
         // ⑥ 高级选项（默认收起，避免 v3 那种「选项堆砌」）
         h('hr', { className: 'dmp-sep' }),

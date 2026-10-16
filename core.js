@@ -460,6 +460,82 @@ export function buildPanelState(cfg, model) {
 }
 
 /**
+ * 把一次真实装配（PromptAssembly）摘要成面板可读的结构。
+ *
+ * 为什么要它：v3 的预览只是「把配置重算一遍」，用户看不到**真实的系统提示词
+ * 长什么样**——不知道有哪些段、顺序如何、自己的人格段插在哪、被 replace 掉了什么。
+ * 现在调 `ctx.systemPrompt.assemble()` 拿真结果，逐段列出来。
+ *
+ * 纯函数：不碰 ctx、不碰文件，可在 Node 里单测，也可在浏览器里跑。
+ *
+ * @param {object} assembly  assemble() 的返回值 { sections, contexts, tools, variables }
+ * @param {object} opts      { ownSection: 本插件段名, replaced: 是否走了 replace, model }
+ * @returns {{sections: Array, totalChars: number, ownChars: number, toolCount: number}}
+ */
+export function summarizeAssembly(assembly, opts = {}) {
+  const own = typeof opts.ownSection === 'string' ? opts.ownSection : ''
+  const sections = []
+  let totalChars = 0
+  let ownChars = 0
+
+  const list = assembly && Array.isArray(assembly.sections) ? assembly.sections : []
+  for (const s of list) {
+    if (!s || typeof s !== 'object') continue
+    // 既没有段名也没有可求值文本的项是噪音（例如 `{}`），跳过，
+    // 否则面板会多出一行「(未命名) 0 字符」的垃圾。
+    const hasName = typeof s.name === 'string' && s.name
+    const hasText = typeof s.text === 'string' || typeof s.text === 'function'
+    if (!hasName && !hasText) continue
+    // 段的 text 可能是字符串，也可能是「每步求值」的函数（本插件自己就是函数）
+    let text = ''
+    let lazy = false
+    if (typeof s.text === 'string') text = s.text
+    else if (typeof s.text === 'function') {
+      lazy = true
+      try {
+        const v = s.text({ agent: { options: { model: opts.model || '' } } })
+        text = typeof v === 'string' ? v : ''
+      } catch {
+        text = ''
+      }
+    }
+    const chars = text.length
+    totalChars += chars
+    const isOwn = !!own && s.name === own
+    if (isOwn) ownChars += chars
+    sections.push({
+      name: typeof s.name === 'string' ? s.name : '(未命名)',
+      order: Number.isFinite(s.order) ? s.order : null,
+      chars,
+      own: isOwn,
+      lazy,
+      // 只给前 200 字，避免面板被整篇提示词撑爆
+      head: text.slice(0, 200),
+    })
+  }
+
+  const tools = assembly && Array.isArray(assembly.tools) ? assembly.tools : []
+  const contexts = assembly && Array.isArray(assembly.contexts) ? assembly.contexts : []
+  const variables = assembly && Array.isArray(assembly.variables) ? assembly.variables : []
+
+  return {
+    sections,
+    sectionCount: sections.length,
+    totalChars,
+    ownChars,
+    ownInjected: ownChars > 0,
+    toolCount: tools.length,
+    toolNames: tools
+      .map((t) => (t && typeof t.name === 'string' ? t.name : ''))
+      .filter(Boolean)
+      .slice(0, 40),
+    contextCount: contexts.length,
+    variableCount: variables.length,
+    replaced: opts.replaced === true,
+  }
+}
+
+/**
  * 原子写配置：先写同目录临时文件，再 rename 覆盖。
  * 直接覆写有「写到一半崩 → config.json 半截 → 插件降级」的风险，rename 在
  * 同一文件系统内是原子的，最坏情况是保留旧文件。

@@ -16,6 +16,7 @@ import {
   validateConfigInput,
   buildPanelState,
   writeConfigAtomic,
+  summarizeAssembly,
   DEFAULT_CONFIG,
 } from './core.js'
 
@@ -899,4 +900,121 @@ test('★ removePrompt：只删目标，null 条目仍被清理', () => {
   const lib = [null, { id: 'a', text: 'A', source: 'manual' }, null]
   const out = removePrompt(lib, 'a')
   assert.equal(out.length, 0)
+})
+
+// ── summarizeAssembly（v4 真实装配预览） ───────────────────
+
+
+const fakeAssembly = () => ({
+  sections: [
+    { name: 'harness:identity', order: 0, text: '你是 DSH 助手。' },
+    { name: 'harness:tools', order: 5, text: '工具使用指导：...'.repeat(20) },
+    { name: 'model-persona:main', order: 1, text: '你运行在某个模型上。先给结论。' },
+    { name: 'plan:policy', order: 9, text: '计划策略...' },
+  ],
+  contexts: [{ name: 'cwd' }, { name: 'sandbox' }],
+  tools: [{ name: 'read' }, { name: 'write' }, { name: 'bash' }],
+  variables: [{ name: 'date' }],
+})
+
+test('★ summarizeAssembly：逐段摘要，标出本插件的段', () => {
+  const s = summarizeAssembly(fakeAssembly(), { ownSection: 'model-persona:main' })
+  assert.equal(s.sectionCount, 4)
+  assert.equal(s.sections.length, 4)
+  const own = s.sections.find((x) => x.name === 'model-persona:main')
+  assert.equal(own.own, true, '本插件段必须被标出来')
+  assert.ok(own.chars > 0)
+  assert.equal(s.sections.filter((x) => x.own).length, 1, '只应有一段是本插件的')
+})
+
+test('summarizeAssembly：统计总字符与本插件字符', () => {
+  const s = summarizeAssembly(fakeAssembly(), { ownSection: 'model-persona:main' })
+  assert.ok(s.totalChars > s.ownChars, '总字符应大于本插件字符')
+  assert.equal(s.ownInjected, true)
+  assert.equal(s.ownChars, '你运行在某个模型上。先给结论。'.length)
+})
+
+test('summarizeAssembly：工具数量与名字', () => {
+  const s = summarizeAssembly(fakeAssembly(), {})
+  assert.equal(s.toolCount, 3)
+  assert.deepEqual(s.toolNames, ['read', 'write', 'bash'])
+})
+
+test('summarizeAssembly：contexts / variables 计数', () => {
+  const s = summarizeAssembly(fakeAssembly(), {})
+  assert.equal(s.contextCount, 2)
+  assert.equal(s.variableCount, 1)
+})
+
+test('★ summarizeAssembly：函数段被求值（本插件就是函数段）', () => {
+  const asm = {
+    sections: [
+      { name: 'model-persona:main', order: 1, text: (ctx) => `模型=${ctx.agent.options.model}` },
+    ],
+    tools: [],
+    contexts: [],
+    variables: [],
+  }
+  const s = summarizeAssembly(asm, { ownSection: 'model-persona:main', model: 'vendor/x' })
+  assert.equal(s.sections[0].lazy, true, '应标记为懒求值段')
+  assert.equal(s.sections[0].chars, '模型=vendor/x'.length)
+  assert.equal(s.sections[0].head, '模型=vendor/x')
+})
+
+test('summarizeAssembly：函数段抛错时降级为空，不崩', () => {
+  const asm = {
+    sections: [{ name: 'bad', order: 1, text: () => { throw new Error('boom') } }],
+    tools: [],
+    contexts: [],
+    variables: [],
+  }
+  const s = summarizeAssembly(asm, {})
+  assert.equal(s.sections[0].chars, 0)
+  assert.equal(s.sections[0].head, '')
+})
+
+test('summarizeAssembly：只保留前 200 字，避免面板被撑爆', () => {
+  const long = 'x'.repeat(5000)
+  const s = summarizeAssembly({ sections: [{ name: 'a', order: 1, text: long }], tools: [] }, {})
+  assert.equal(s.sections[0].chars, 5000, '字符数要算全量')
+  assert.equal(s.sections[0].head.length, 200, '预览只给前 200 字')
+})
+
+test('summarizeAssembly：畸形输入一律降级，绝不抛', () => {
+  assert.deepEqual(summarizeAssembly(null, {}).sections, [])
+  assert.deepEqual(summarizeAssembly(undefined, {}).sections, [])
+  assert.equal(summarizeAssembly({}, {}).sectionCount, 0)
+  assert.equal(summarizeAssembly({ sections: '不是数组' }, {}).sectionCount, 0)
+  assert.equal(summarizeAssembly({ sections: [null, 'str', {}] }, {}).sectionCount, 0)
+  assert.equal(summarizeAssembly({ sections: [{ name: 'a' }] }, {}).sections[0].chars, 0)
+})
+
+test('summarizeAssembly：无 name 的段给占位名', () => {
+  const s = summarizeAssembly({ sections: [{ text: 'x' }] }, {})
+  assert.equal(s.sections[0].name, '(未命名)')
+})
+
+test('summarizeAssembly：没传 ownSection 时没有段被标为 own', () => {
+  const s = summarizeAssembly(fakeAssembly(), {})
+  assert.equal(s.sections.filter((x) => x.own).length, 0)
+  assert.equal(s.ownInjected, false)
+})
+
+test('summarizeAssembly：工具数超过 40 个只留前 40 个名字', () => {
+  const tools = Array.from({ length: 60 }, (_, i) => ({ name: `t${i}` }))
+  const s = summarizeAssembly({ sections: [], tools }, {})
+  assert.equal(s.toolCount, 60, '数量算全量')
+  assert.equal(s.toolNames.length, 40, '名字只留前 40')
+})
+
+test('summarizeAssembly：replaced 标记透传', () => {
+  assert.equal(summarizeAssembly({ sections: [] }, { replaced: true }).replaced, true)
+  assert.equal(summarizeAssembly({ sections: [] }, {}).replaced, false)
+})
+
+test('summarizeAssembly：不改入参', () => {
+  const asm = fakeAssembly()
+  const snap = JSON.stringify(asm)
+  summarizeAssembly(asm, { ownSection: 'model-persona:main' })
+  assert.equal(JSON.stringify(asm), snap)
 })

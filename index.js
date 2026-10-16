@@ -35,6 +35,7 @@ import {
 } from './core.js'
 import { registerPanelRoutes } from './panel-host.js'
 import { normalizeModelCatalog } from './prompt-lib.js'
+import { summarizeAssembly } from './core.js'
 
 export const name = 'dsh-model-persona'
 
@@ -136,6 +137,41 @@ export function apply(ctx) {
   }
 
   /**
+   * ④ 真实装配预览（v4）。
+   *
+   * 调 `ctx.systemPrompt.assemble()` 拿**真实**的 PromptAssembly，
+   * 再用 summarizeAssembly 摘要成面板可读的结构。
+   *
+   * ⚠️ 三个坑（都实测过或从官方源码确认）：
+   *   1. assemble 需要 AssembleContext；我们的段是「每步求值」函数，
+   *      摘要时必须传 { agent: { options: { model } } }，否则段文本取不到。
+   *   2. assemble 是 async，可能抛；抛了就降级，绝不让预览 500。
+   *   3. 没有 systemPrompt 服务的 profile 里直接用不了 —— 用可选注入。
+   */
+  let assembleService = null
+  try {
+    ctx.inject(['systemPrompt'], (scope) => {
+      const svc = scope && scope.systemPrompt
+      if (svc && typeof svc.assemble === 'function') assembleService = svc
+    })
+  } catch {
+    /* 拿不到就只用旧预览，人格注入本身不依赖它 */
+  }
+
+  const assemblePreview = async (model) => {
+    if (!assembleService) throw new Error('systemPrompt.assemble 不可用')
+    const cfg = safeRead()
+    const asm = await assembleService.assemble({
+      agent: { options: { model: model || '' } },
+    })
+    return summarizeAssembly(asm, {
+      ownSection: cfg.sectionName || DEFAULT_CONFIG.sectionName,
+      model: model || '',
+      replaced: cfg.mode === 'replace',
+    })
+  }
+
+  /**
    * ① append 模式：注册一个段。
    * 注册失败（同层重名）只 warn，不让整棵插件树起不来。
    */
@@ -226,6 +262,7 @@ export function apply(ctx) {
           readConfig: safeRead,
           modelCatalog,
           setCatalog: (raw) => applyCatalog(raw, 'fallback'),
+          assemblePreview,
           warn,
         })
         scope.effect(() => dispose, 'dsh-model-persona.panel-routes()')
