@@ -79,7 +79,14 @@ function readBody(req, limit = 512 * 1024) {
  * @returns {() => void}   disposer
  */
 export function registerPanelRoutes(scope, deps) {
-  const { configPath, lastModelPath, readConfig, warn = () => {} } = deps
+  const {
+    configPath,
+    lastModelPath,
+    readConfig,
+    modelCatalog = { models: [], source: 'none', error: '' },
+    setCatalog = () => {},
+    warn = () => {},
+  } = deps
 
   const webServer = scope && scope.webServer
   if (!webServer || typeof webServer.register !== 'function') {
@@ -117,7 +124,16 @@ export function registerPanelRoutes(scope, deps) {
           } catch {
             model = ''
           }
-          sendJson(res, 200, { ok: true, state: buildPanelState(cfg, model) })
+          sendJson(res, 200, {
+            ok: true,
+            state: buildPanelState(cfg, model),
+            // 模型目录（双轨）：service 拿到或手贴的，都没有就是空数组
+            models: Array.isArray(modelCatalog && modelCatalog.models)
+              ? modelCatalog.models
+              : [],
+            catalogSource: (modelCatalog && modelCatalog.source) || 'none',
+            catalogError: (modelCatalog && modelCatalog.error) || '',
+          })
         }),
       }),
     )
@@ -161,6 +177,46 @@ export function registerPanelRoutes(scope, deps) {
     warn(`${LOG} 注册 /config 失败：${(e && e.message) || e}`)
   }
 
+  // ②b 手贴模型目录（兜底轨：本机没有 sessionController 服务时用）
+  try {
+    disposers.push(
+      webServer.register({
+        kind: 'exact',
+        path: `${PREFIX}/catalog`,
+        handler: guard(async (req, res) => {
+          if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          if (req.headers['x-model-persona'] !== '1') {
+            return sendJson(res, 403, { ok: false, error: 'missing X-Model-Persona header' })
+          }
+          const ctype = String(req.headers['content-type'] || '')
+          if (!ctype.includes('application/json')) {
+            return sendJson(res, 415, { ok: false, error: 'content-type must be application/json' })
+          }
+          const raw = await readBody(req)
+          let parsed
+          try {
+            parsed = JSON.parse(raw)
+          } catch {
+            return sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' })
+          }
+          // 归一化与校验都在调用方（index.js 的 applyCatalog）里做，
+          // 这里只负责把数据递过去，避免两套校验逻辑漂移。
+          try {
+            setCatalog(parsed && typeof parsed === 'object' ? parsed.catalog : parsed)
+          } catch (e) {
+            return sendJson(res, 400, { ok: false, error: (e && e.message) || '目录无效' })
+          }
+          if (!modelCatalog.models.length) {
+            return sendJson(res, 400, { ok: false, error: '目录为空或没有可用条目' })
+          }
+          sendJson(res, 200, { ok: true, count: modelCatalog.models.length })
+        }),
+      }),
+    )
+  } catch (e) {
+    warn(`${LOG} 注册 /catalog 失败：${(e && e.message) || e}`)
+  }
+
   // ③ 预览：给定模型（默认用当前真实模型）会注入什么
   try {
     disposers.push(
@@ -187,7 +243,7 @@ export function registerPanelRoutes(scope, deps) {
     warn(`${LOG} 注册 /preview 失败：${(e && e.message) || e}`)
   }
 
-  warn(`${LOG} 面板路由已注册 ${disposers.length}/3 条（${PREFIX}/*）`)
+  warn(`${LOG} 面板路由已注册 ${disposers.length} 条（${PREFIX}/*）`)
 
   return () => {
     for (const d of disposers) {

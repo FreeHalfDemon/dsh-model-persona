@@ -75,12 +75,21 @@ export function normalizePrompt(raw) {
   const source = SOURCES.includes(raw.source) ? raw.source : 'manual'
   const url = typeof raw.url === 'string' ? raw.url.trim() : ''
   const at = typeof raw.at === 'string' ? raw.at : new Date().toISOString()
-  return { ok: true, value: { id, name, source, url, text, at } }
+  return {
+    ok: true,
+    value: { id, name, source, url, text, at },
+    // 供 upsertPrompt 区分「调用方显式指定了 source」与「没提」——
+    // 没提时必须沿用旧值，否则用户只改文本会把来源标记悄悄降级成 manual
+    provided: {
+      source: SOURCES.includes(raw.source),
+      at: typeof raw.at === 'string' && raw.at.trim() !== '',
+    },
+  }
 }
 
 /** 校验整个库；内置条目始终在场且不可删（由调用方过滤 id 以 builtin- 开头） */
 export function normalizeLibrary(raw) {
-  if (raw === undefined || raw === null) return { ...BUILTIN_PROMPTS.map((p) => ({ ...p })) }
+  if (raw === undefined || raw === null) return BUILTIN_PROMPTS.map((p) => ({ ...p }))
   if (!Array.isArray(raw)) throw new Error('提示词库必须是一个数组')
   const out = []
   const seen = new Set()
@@ -118,11 +127,18 @@ export function upsertPrompt(library, raw) {
   const idx = list.findIndex((e) => e && e.id === entry.id)
   if (idx >= 0) {
     const old = list[idx]
+    const oldIsBuiltin = old.source === 'builtin' || String(old.id).startsWith('builtin-')
     list[idx] = {
       ...entry,
-      // 保留内置标记，不允许把内置条目改成非内置（防误删后来源漂移）
-      source: String(old.source).startsWith('builtin-') || old.source === 'builtin' ? old.source : entry.source,
-      at: entry.at || old.at,
+      // 内置条目的 source 永远锁死（防误删后来源漂移）；
+      // 非内置条目：调用方没显式给 source 就沿用旧值，别悄悄降级成 manual
+      source: oldIsBuiltin
+        ? old.source
+        : checked.provided && checked.provided.source
+          ? entry.source
+          : old.source,
+      // 同理：没显式给 at 就保留旧的，避免每次保存都把时间戳刷成当前时刻
+      at: checked.provided && checked.provided.at ? entry.at : (old.at || entry.at),
     }
   } else {
     list.push(entry)
@@ -136,12 +152,59 @@ export function removePrompt(library, id) {
   const target = (library || []).find((e) => e && e.id === id)
   if (!target) return library
   if (target.source === 'builtin' || String(target.id).startsWith('builtin-')) return library
-  return library.filter((e) => !e || e.id !== id)
+  // 注意：必须写成 `e && e.id !== id`。若写成 `!e || e.id !== id`，
+  // null 条目会因 `!e` 为真而被保留，等于「删不掉任何东西」。
+  return library.filter((e) => e && e.id !== id)
 }
 
 export function findPrompt(library, id) {
   if (typeof id !== 'string' || !id) return null
   return (library || []).find((e) => e && e.id === id) || null
+}
+
+/**
+ * 把任意来源的「模型目录」归一成统一的 [{ id, name }]。
+ *
+ * 这是 v4 模型下拉框的数据层，**双轨设计**：
+ *   · 首选来源  `ctx.sessionController.modelCatalog()`（Host 运行时生成，最新、最全）
+ *   · 兜底来源  用户手贴的一份目录 JSON（某些 DSH 版本可能没有该服务）
+ *
+ * 为什么不在这一层读文件/调服务：保持它是**纯函数**，可单测、可在浏览器里跑
+ * （面板拿到的数据可能是服务返回的，也可能是用户粘贴的，一律走这里）。
+ *
+ * 认两种输入形态：
+ *   ① ModelCatalog：{ providers: [{ id, name, models: [{id, name}] }] }
+ *   ② 扁平数组：   [{ id, name }]
+ * 其它形态（null / 字符串 / 空数组）一律返回 []，绝不抛。
+ *
+ * @returns {Array<{id: string, name: string}>} 已按 id 去重、无 id 的条目被丢弃
+ */
+export function normalizeModelCatalog(raw) {
+  const out = []
+  const seen = new Set()
+  const push = (m) => {
+    if (!isPlainObject(m)) return
+    const id = typeof m.id === 'string' ? m.id.trim() : ''
+    if (!id || seen.has(id)) return
+    seen.add(id)
+    const name = typeof m.name === 'string' && m.name.trim() ? m.name.trim() : id
+    out.push({ id, name })
+  }
+
+  if (Array.isArray(raw)) {
+    for (const m of raw) push(m)
+    return out
+  }
+  if (isPlainObject(raw) && Array.isArray(raw.providers)) {
+    for (const g of raw.providers) {
+      if (!isPlainObject(g) || !Array.isArray(g.models)) continue
+      for (const m of g.models) push(m)
+    }
+    // 目录自带的 default 也可能不在任何 provider 组里，补上以免漏选
+    if (isPlainObject(raw.default) && raw.default.id) push(raw.default)
+    return out
+  }
+  return out
 }
 
 /**
@@ -177,8 +240,12 @@ export function parseModelCatalog(yamlText) {
       flush()
       continue
     }
-    if (inLlm && /^\s*-\s*id:\s*\S/.test(line) && !/llm-pi-ai/.test(line)) {
-      // 下一个顶层 loader 行 → 离开
+    // 离开 llm-pi-ai：必须是**下一个顶层 loader 行**。
+    // ⚠️ 不能只靠 `- id:` 判断 —— providers 下的 `- id: p`（provider 自己的 id）
+    //    与 loader 行的 `- id:` 格式完全一样，只能靠缩进区分：
+    //    loader 行缩进 4，provider 行缩进 10。少了缩进约束会把 provider 行
+    //    误判成「下一个 loader 行」而提前退出，导致整个目录解析为空。
+    if (inLlm && /^\s{0,6}-\s*id:\s*\S/.test(line) && !/llm-pi-ai/.test(line)) {
       flush()
       inLlm = false
       inModels = false
@@ -191,19 +258,21 @@ export function parseModelCatalog(yamlText) {
       inModels = true
       continue
     }
-    if (/^\s{8}\S/.test(line) && !/^\s{10}-/.test(line) && inModels) {
-      // 缩进回到 providers 同级 → 离开 models
-      if (!/^\s*-\s*id:/.test(line)) {
+    if (/^\s{8}\S/.test(line) && inModels) {
+      // 缩进比 models: 浅（回到 providers 同级）→ 离开 models 块
+      if (!/^\s*models:/.test(line)) {
         flush()
         inModels = false
       }
     }
     if (!inModels) continue
 
-    const idm = line.match(/^\s*-\s*id:\s*(\S+)\s*$/)
-    if (idm) {
+    // models: 块内的模型项缩进固定（比 models: 深两级）；
+    // 缩进更浅的 `- id:` 是下一个 provider，不是模型。
+    const idm = line.match(/^(\s*)-\s*id:\s*(\S+)\s*$/)
+    if (idm && idm[1].length >= 12) {
       flush()
-      current = { id: idm[1], name: '' }
+      current = { id: idm[2], name: '' }
       continue
     }
     if (current && /^\s{10,}name:\s*/.test(line)) {

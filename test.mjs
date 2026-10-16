@@ -485,3 +485,418 @@ test('★ writeConfigAtomic：写失败时清理临时文件且返回错误', ()
   assert.equal(calls.length, 1, '应尝试清理临时文件')
   assert.match(calls[0][1], /\.tmp-/, '清理的是临时文件')
 })
+
+// ════════════════════════════════════════════════════════════════
+// v4：提示词库 prompt-lib.js
+// ════════════════════════════════════════════════════════════════
+import {
+  BUILTIN_PROMPTS,
+  SOURCES,
+  nextPromptId,
+  normalizePrompt,
+  normalizeLibrary,
+  upsertPrompt,
+  removePrompt,
+  findPrompt,
+  parseModelCatalog,
+} from './prompt-lib.js'
+
+test('BUILTIN_PROMPTS：三条内置，id 均以 builtin- 开头', () => {
+  assert.ok(Array.isArray(BUILTIN_PROMPTS))
+  assert.ok(BUILTIN_PROMPTS.length >= 3)
+  for (const p of BUILTIN_PROMPTS) {
+    assert.ok(String(p.id).startsWith('builtin-'), `id 应以 builtin- 开头：${p.id}`)
+    assert.ok(p.text && p.text.trim(), '内置条目不能为空文本')
+    assert.equal(p.source, 'builtin')
+  }
+})
+
+test('nextPromptId：不冲突时返回 base 本身', () => {
+  assert.equal(nextPromptId([], 'prompt'), 'prompt')
+  assert.equal(nextPromptId([{ id: 'other' }], 'prompt'), 'prompt')
+})
+
+test('nextPromptId：冲突时递增后缀', () => {
+  const lib = [{ id: 'prompt' }, { id: 'prompt-2' }]
+  assert.equal(nextPromptId(lib, 'prompt'), 'prompt-3')
+})
+
+test('nextPromptId：跳过空洞', () => {
+  const lib = [{ id: 'prompt' }, { id: 'prompt-3' }]
+  assert.equal(nextPromptId(lib, 'prompt'), 'prompt-2')
+})
+
+test('normalizePrompt：合法输入补全默认字段', () => {
+  const r = normalizePrompt({ text: '你好' })
+  assert.equal(r.ok, true)
+  assert.equal(r.value.text, '你好')
+  assert.equal(r.value.source, 'manual', '未指定 source 应回落 manual')
+  assert.ok(r.value.at, '应补 at 时间戳')
+})
+
+test('normalizePrompt：拒绝空文本与非对象', () => {
+  assert.equal(normalizePrompt({ text: '   ' }).ok, false)
+  assert.equal(normalizePrompt(null).ok, false)
+  assert.equal(normalizePrompt('string').ok, false)
+  assert.equal(normalizePrompt([]).ok, false)
+})
+
+test('normalizePrompt：source 不在白名单则回落 manual', () => {
+  const r = normalizePrompt({ text: 'x', source: 'evil' })
+  assert.equal(r.ok, true)
+  assert.equal(r.value.source, 'manual')
+})
+
+test('★ normalizeLibrary：null/undefined 返回内置副本（且是数组）', () => {
+  const a = normalizeLibrary(null)
+  const b = normalizeLibrary(undefined)
+  assert.ok(Array.isArray(a), '必须返回数组，不能是类数组对象')
+  assert.ok(Array.isArray(b))
+  assert.ok(a.length >= 3)
+})
+
+test('★ normalizeLibrary：返回的是副本，改它不影响 BUILTIN_PROMPTS', () => {
+  const lib = normalizeLibrary(null)
+  lib[0].text = '被改坏了'
+  assert.notEqual(BUILTIN_PROMPTS[0].text, '被改坏了', '不允许污染内置常量')
+})
+
+test('normalizeLibrary：丢弃空文本与非对象条目', () => {
+  const lib = normalizeLibrary([{ id: 'a', text: 'ok' }, { id: 'b', text: '' }, null, 'str'])
+  assert.equal(lib.length, 1 + BUILTIN_PROMPTS.length)
+  assert.equal(lib[0].id, 'a')
+})
+
+test('normalizeLibrary：id 去重，保留首条', () => {
+  const lib = normalizeLibrary([
+    { id: 'dup', text: '第一条' },
+    { id: 'dup', text: '第二条' },
+  ])
+  const dups = lib.filter((e) => e.id === 'dup')
+  assert.equal(dups.length, 1)
+  assert.equal(dups[0].text, '第一条')
+})
+
+test('normalizeLibrary：无 id 自动分配且不撞已有', () => {
+  const lib = normalizeLibrary([{ text: '一' }, { id: 'prompt', text: '二' }, { text: '三' }])
+  const ids = lib.map((e) => e.id)
+  assert.equal(new Set(ids).size, ids.length, 'id 必须唯一')
+  assert.ok(ids.includes('prompt'))
+})
+
+test('★ normalizeLibrary：内置条目被删后自动恢复', () => {
+  const lib = normalizeLibrary([{ id: 'my', text: '我的' }])
+  for (const b of BUILTIN_PROMPTS) {
+    assert.ok(lib.some((e) => e.id === b.id), `内置条目 ${b.id} 应被恢复`)
+  }
+})
+
+test('normalizeLibrary：非数组入参抛错', () => {
+  assert.throws(() => normalizeLibrary('不是数组'), /数组/)
+  assert.throws(() => normalizeLibrary({}), /数组/)
+})
+
+test('★ upsertPrompt：不改入参（不可变）', () => {
+  const lib = [{ id: 'a', name: 'A', source: 'manual', text: '原文', url: '', at: 't1' }]
+  const snapshot = JSON.stringify(lib)
+  upsertPrompt(lib, { id: 'a', text: '新文' })
+  assert.equal(JSON.stringify(lib), snapshot, '入参必须原样不动')
+})
+
+test('upsertPrompt：新 id 追加到末尾', () => {
+  const lib = [{ id: 'a', text: 'A' }]
+  const out = upsertPrompt(lib, { text: 'B' })
+  assert.equal(out.length, 2)
+  assert.ok(out[1].text === 'B')
+})
+
+test('upsertPrompt：同 id 覆盖内容但保留原 source/at', () => {
+  const lib = [{ id: 'a', name: '原名', source: 'web', text: '旧', url: 'http://x', at: '2020' }]
+  const out = upsertPrompt(lib, { id: 'a', text: '新' })
+  assert.equal(out.length, 1)
+  assert.equal(out[0].text, '新')
+  assert.equal(out[0].source, 'web', '非内置条目的 source 应保留')
+  assert.equal(out[0].at, '2020', '未提供 at 应保留旧的')
+})
+
+test('★ upsertPrompt：内置条目不可改成非内置（防来源漂移）', () => {
+  const lib = normalizeLibrary(null)
+  const out = upsertPrompt(lib, { id: 'builtin-concise', source: 'web', text: '改写' })
+  const hit = out.find((e) => e.id === 'builtin-concise')
+  assert.equal(hit.source, 'builtin', '内置条目的 source 不允许被改成别的')
+})
+
+test('upsertPrompt：空文本抛错', () => {
+  assert.throws(() => upsertPrompt([], { text: '' }), /不能为空/)
+})
+
+test('★ removePrompt：普通条目能删', () => {
+  const lib = [{ id: 'a', text: 'A', source: 'manual' }, { id: 'b', text: 'B', source: 'manual' }]
+  const out = removePrompt(lib, 'a')
+  assert.equal(out.length, 1)
+  assert.equal(out[0].id, 'b')
+})
+
+test('★ removePrompt：内置条目删不掉', () => {
+  const lib = normalizeLibrary(null)
+  const before = lib.length
+  const out = removePrompt(lib, 'builtin-concise')
+  assert.equal(out.length, before, '删除内置条目应无效')
+  assert.ok(out.some((e) => e.id === 'builtin-concise'))
+})
+
+test('removePrompt：id 以 builtin- 开头的一律删不掉（兜底）', () => {
+  const lib = [{ id: 'builtin-x', text: 'X', source: 'manual' }]
+  const out = removePrompt(lib, 'builtin-x')
+  assert.equal(out.length, 1, '按 id 前缀兜底保护')
+})
+
+test('removePrompt：删不存在的 id 原样返回', () => {
+  const lib = [{ id: 'a', text: 'A', source: 'manual' }]
+  assert.equal(removePrompt(lib, 'nope').length, 1)
+  assert.equal(removePrompt(lib, '').length, 1)
+  assert.equal(removePrompt(null, 'a'), null)
+})
+
+test('removePrompt：不改入参', () => {
+  const lib = [{ id: 'a', text: 'A', source: 'manual' }]
+  const snap = JSON.stringify(lib)
+  removePrompt(lib, 'a')
+  assert.equal(JSON.stringify(lib), snap)
+})
+
+test('findPrompt：命中与未命中', () => {
+  const lib = [{ id: 'a', text: 'A' }]
+  assert.equal(findPrompt(lib, 'a').text, 'A')
+  assert.equal(findPrompt(lib, 'nope'), null)
+  assert.equal(findPrompt(lib, ''), null)
+  assert.equal(findPrompt(null, 'a'), null)
+})
+
+// ── parseModelCatalog ──────────────────────────────────────────
+
+const SAMPLE_YAML = [
+  '- insert:',
+  '    - id: llm-pi-ai',
+  '      name: llm-pi-ai',
+  '      config:',
+  '        providers:',
+  '          - id: provider-a',
+  '            name: A 家',
+  '            models:',
+  '              - id: vendor/model-one',
+  '                name: Model One',
+  '              - id: vendor/model-two',
+  '                name: "Model Two"',
+  '          - id: provider-b',
+  '            models:',
+  '              - id: other/model-three',
+  '                name: Model Three',
+  '    - id: some-other-plugin',
+  '      config:',
+  '        providers:',
+  '          - id: provider-c',
+  '            models:',
+  '              - id: should/not-appear',
+  '                name: Nope',
+  '',
+].join('\n')
+
+test('★ parseModelCatalog：跨多个 provider 抽出全部模型', () => {
+  const out = parseModelCatalog(SAMPLE_YAML)
+  assert.equal(out.length, 3, `应抽出 3 个，实得 ${out.length}`)
+  assert.deepEqual(out.map((m) => m.id), [
+    'vendor/model-one',
+    'vendor/model-two',
+    'other/model-three',
+  ])
+})
+
+test('★ parseModelCatalog：name 成对提取，去引号', () => {
+  const out = parseModelCatalog(SAMPLE_YAML)
+  assert.equal(out[0].name, 'Model One')
+  assert.equal(out[1].name, 'Model Two', '双引号应被剥掉')
+})
+
+test('★ parseModelCatalog：只认 llm-pi-ai 段，别的 loader 行不越界', () => {
+  const out = parseModelCatalog(SAMPLE_YAML)
+  assert.ok(!out.some((m) => m.id === 'should/not-appear'), '不应跨出 llm-pi-ai')
+})
+
+test('parseModelCatalog：忽略注释与空行', () => {
+  const out = parseModelCatalog('# 注释\n\n- insert:\n    - id: llm-pi-ai\n      config:\n        providers:\n          - id: p\n            models:\n              - id: a/b\n                name: AB\n')
+  assert.equal(out.length, 1)
+  assert.equal(out[0].id, 'a/b')
+})
+
+test('parseModelCatalog：没有 llm-pi-ai 时返回空数组', () => {
+  assert.deepEqual(parseModelCatalog('- insert:\n    - id: other\n'), [])
+  assert.deepEqual(parseModelCatalog(''), [])
+  assert.deepEqual(parseModelCatalog(null), [])
+})
+
+test('parseModelCatalog：models 为空或模型无 name 也安全', () => {
+  const y = [
+    '- insert:',
+    '    - id: llm-pi-ai',
+    '      config:',
+    '        providers:',
+    '          - id: p',
+    '            models:',
+    '              - id: only/id',
+    '',
+  ].join('\n')
+  const out = parseModelCatalog(y)
+  assert.equal(out.length, 1)
+  assert.equal(out[0].id, 'only/id')
+  assert.equal(out[0].name, '', '无 name 时应为空串而非 undefined')
+})
+
+test('parseModelCatalog：重复 id 不去重（目录原样）', () => {
+  const y = [
+    '- insert:',
+    '    - id: llm-pi-ai',
+    '      config:',
+    '        providers:',
+    '          - id: p',
+    '            models:',
+    '              - id: a/b',
+    '                name: AB',
+    '              - id: a/b',
+    '                name: AB2',
+    '',
+  ].join('\n')
+  const out = parseModelCatalog(y)
+  assert.equal(out.length, 2, '模型目录按原样输出，去重交给界面')
+})
+
+// ── normalizeModelCatalog（v4 双轨：服务返回 or 手贴） ──────────
+import { normalizeModelCatalog } from './prompt-lib.js'
+
+test('★ normalizeModelCatalog：ModelCatalog 形态跨 provider 拍平', () => {
+  const cat = {
+    default: { id: 'vendor/def', name: '默认模型' },
+    providers: [
+      { id: 'pa', name: 'A 家', models: [
+        { id: 'vendor/one', name: 'One' },
+        { id: 'vendor/two', name: 'Two', description: '描述' },
+      ] },
+      { id: 'pb', name: 'B 家', models: [{ id: 'other/three', name: 'Three' }] },
+    ],
+  }
+  const out = normalizeModelCatalog(cat)
+  assert.equal(out.length, 4)
+  assert.deepEqual(out.map((m) => m.id), [
+    'vendor/one',
+    'vendor/two',
+    'other/three',
+    'vendor/def',
+  ])
+  assert.equal(out[0].name, 'One')
+})
+
+test('normalizeModelCatalog：扁平数组形态', () => {
+  const out = normalizeModelCatalog([{ id: 'a/b', name: 'AB' }])
+  assert.equal(out.length, 1)
+  assert.deepEqual(out[0], { id: 'a/b', name: 'AB' })
+})
+
+test('★ normalizeModelCatalog：按 id 去重，保留首条', () => {
+  const out = normalizeModelCatalog([
+    { id: 'a/b', name: '第一个名字' },
+    { id: 'a/b', name: '第二个名字' },
+  ])
+  assert.equal(out.length, 1)
+  assert.equal(out[0].name, '第一个名字')
+})
+
+test('normalizeModelCatalog：跨 provider 的重复 id 也去重', () => {
+  const cat = {
+    providers: [
+      { id: 'p1', models: [{ id: 'x/y', name: 'X' }] },
+      { id: 'p2', models: [{ id: 'x/y', name: 'X again' }] },
+    ],
+  }
+  const out = normalizeModelCatalog(cat)
+  assert.equal(out.length, 1, '同一个 id 在两个 provider 下只留一个')
+})
+
+test('normalizeModelCatalog：缺 name 时回退成 id', () => {
+  const out = normalizeModelCatalog([{ id: 'a/b' }])
+  assert.equal(out[0].name, 'a/b', '没有 name 就用 id 顶着，别显示空白')
+})
+
+test('normalizeModelCatalog：丢弃无 id / 非对象条目', () => {
+  const out = normalizeModelCatalog([
+    { name: '没 id' },
+    null,
+    '字符串',
+    { id: '  ', name: '空白 id' },
+    { id: 'ok', name: 'OK' },
+  ])
+  assert.equal(out.length, 1)
+  assert.equal(out[0].id, 'ok')
+})
+
+test('normalizeModelCatalog：default 不在任何组里也要收', () => {
+  const cat = {
+    default: { id: 'solo/def', name: 'D' },
+    providers: [{ id: 'p', models: [{ id: 'a/b', name: 'AB' }] }],
+  }
+  const out = normalizeModelCatalog(cat)
+  assert.ok(out.some((m) => m.id === 'solo/def'), 'default 不能被漏掉')
+})
+
+test('normalizeModelCatalog：default 与某组重复时不重复收', () => {
+  const cat = {
+    default: { id: 'a/b', name: 'D' },
+    providers: [{ id: 'p', models: [{ id: 'a/b', name: 'AB' }] }],
+  }
+  assert.equal(normalizeModelCatalog(cat).length, 1)
+})
+
+test('normalizeModelCatalog：畸形输入一律返回空数组，绝不抛', () => {
+  assert.deepEqual(normalizeModelCatalog(null), [])
+  assert.deepEqual(normalizeModelCatalog(undefined), [])
+  assert.deepEqual(normalizeModelCatalog('字符串'), [])
+  assert.deepEqual(normalizeModelCatalog(42), [])
+  assert.deepEqual(normalizeModelCatalog([]), [])
+  assert.deepEqual(normalizeModelCatalog({}), [])
+  assert.deepEqual(normalizeModelCatalog({ providers: '不是数组' }), [])
+  assert.deepEqual(normalizeModelCatalog({ providers: [null, {}, { models: 'x' }] }), [])
+})
+
+test('normalizeModelCatalog：providers 里某组无 models 不影响其它组', () => {
+  const cat = {
+    providers: [
+      { id: 'broken' },
+      { id: 'ok', models: [{ id: 'a/b', name: 'AB' }] },
+    ],
+  }
+  assert.equal(normalizeModelCatalog(cat).length, 1)
+})
+
+test('normalizeModelCatalog：不改入参', () => {
+  const cat = { providers: [{ id: 'p', models: [{ id: 'a/b', name: 'AB' }] }] }
+  const snap = JSON.stringify(cat)
+  normalizeModelCatalog(cat)
+  assert.equal(JSON.stringify(cat), snap)
+})
+
+// ── removePrompt 的 null 条目回归（曾因 `!e ||` 写成死代码） ────
+test('★ removePrompt：库里有 null 条目时仍能删除目标', () => {
+  const lib = [
+    { id: 'a', text: 'A', source: 'manual' },
+    null,
+    { id: 'b', text: 'B', source: 'manual' },
+  ]
+  const out = removePrompt(lib, 'a')
+  assert.equal(out.length, 1, 'null 应被一并清掉，只留 b')
+  assert.equal(out[0].id, 'b')
+})
+
+test('★ removePrompt：只删目标，null 条目仍被清理', () => {
+  const lib = [null, { id: 'a', text: 'A', source: 'manual' }, null]
+  const out = removePrompt(lib, 'a')
+  assert.equal(out.length, 0)
+})

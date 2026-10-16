@@ -34,6 +34,7 @@ import {
   DEFAULT_CONFIG,
 } from './core.js'
 import { registerPanelRoutes } from './panel-host.js'
+import { normalizeModelCatalog } from './prompt-lib.js'
 
 export const name = 'dsh-model-persona'
 
@@ -75,6 +76,64 @@ export function apply(ctx) {
   }
 
   const boot = safeRead()
+
+  /**
+   * ③ 模型目录（v4 模型下拉框的数据源，**双轨**）。
+   *
+   * 首选：`ctx.sessionController.modelCatalog()` —— Host 运行时生成的最新目录，
+   *       每项带 { id, name }，正是「界面显示 name、配置存 id」所需。
+   * 兜底：面板让用户手贴一份目录 JSON（某些 DSH 版本可能没这个服务）。
+   *
+   * ⚠️ 用**可选注入**而不是写进 `export const inject`：那样缺服务就整棵插件起不来。
+   *    这里是纯增强功能，拿不到只影响下拉框，人格注入照常工作。
+   *
+   * 结果缓存在内存里（服务返回的是完整快照，不随会话变），面板路由读缓存。
+   */
+  const modelCatalog = {
+    models: [],
+    source: 'none', // 'service' | 'fallback' | 'none'
+    error: '',
+  }
+
+  const applyCatalog = (raw, source) => {
+    try {
+      const models = normalizeModelCatalog(raw)
+      modelCatalog.models = models
+      modelCatalog.source = models.length ? source : 'none'
+      if (!models.length) modelCatalog.error = '目录为空'
+      else modelCatalog.error = ''
+      if (models.length) {
+        warn(`${LOG} 模型目录已加载（${source}）：${models.length} 个模型`)
+      }
+    } catch (e) {
+      modelCatalog.error = (e && e.message) || String(e)
+      warn(`${LOG} 模型目录解析失败（下拉框不可用，注入不受影响）：${modelCatalog.error}`)
+    }
+  }
+
+  try {
+    ctx.inject(['sessionController'], (scope) => {
+      try {
+        const svc = scope && scope.sessionController
+        if (!svc || typeof svc.modelCatalog !== 'function') {
+          warn(`${LOG} 拿不到 sessionController.modelCatalog，模型下拉框将依赖手贴目录`)
+          return
+        }
+        // 可能是 Promise；失败只 warn，绝不影响人格注入
+        Promise.resolve()
+          .then(() => svc.modelCatalog())
+          .then((cat) => applyCatalog(cat, 'service'))
+          .catch((e) => {
+            modelCatalog.error = (e && e.message) || String(e)
+            warn(`${LOG} modelCatalog() 调用失败（下拉框不可用）：${modelCatalog.error}`)
+          })
+      } catch (e) {
+        warn(`${LOG} 读取模型目录失败（下拉框不可用）：${(e && e.message) || e}`)
+      }
+    })
+  } catch (e) {
+    warn(`${LOG} 注入 sessionController 失败（下拉框不可用）：${(e && e.message) || e}`)
+  }
 
   /**
    * ① append 模式：注册一个段。
@@ -165,6 +224,8 @@ export function apply(ctx) {
           configPath: configPaths(PLUGIN_DIR)[0],
           lastModelPath: path.join(stateDir(PLUGIN_DIR), 'last-model.json'),
           readConfig: safeRead,
+          modelCatalog,
+          setCatalog: (raw) => applyCatalog(raw, 'fallback'),
           warn,
         })
         scope.effect(() => dispose, 'dsh-model-persona.panel-routes()')
