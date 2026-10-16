@@ -1,0 +1,29 @@
+{
+  "name": "dsh-model-persona",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "按当前模型切换整段人格/系统提示词（DSH Host 插件，零依赖，带网页面板）",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./core": "./core.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "meta": {
+    "title": "按模型换人格",
+    "description": "当前模型变了，注入的人格/系统提示词跟着变。带网页设置面板，改完下一步生效，免重启。"
+  }
+}

@@ -1,0 +1,11 @@
+# dsh-model-persona 的 Loader 补丁：插入一个 Host 插件行。
+#
+# loader entry id 全局唯一（重复即硬错 `duplicate loader entry id`），
+# 故此处用独立的 `model-persona-main`，与其它插件、与包名都不重名。
+#
+# 本插件的配置不走这里的 config，而走 $DSH_HOME/model-persona/config.json
+# —— 这样改配置下一步生效、免重启；改这个文件才需要重启。
+- insert:
+    - id: model-persona-main
+      name: dsh-model-persona
+      config: {}

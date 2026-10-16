@@ -1,0 +1,18 @@
+# 提交到 awesome-dsh-plugin 的条目数据文件
+#
+# 用法：仓库 push 到 GitHub 且满 1 天后，
+#       把本文件复制成 <owner>__<repo>.yml，PR 到 awesome-dsh-plugin 的 data/plugins/ 目录。
+#
+# ⚠️ 改这里的两处占位符：
+#     <owner>  你的 GitHub 用户名或组织名
+#     <repo>   仓库名（建议 dsh-model-persona）
+#
+# ⚠️ `en:` 描述含 `: `（半角冒号加空格）必须加引号，否则 YAML 解析失败。
+# ⚠️ 描述必须属实 —— 官方会拿它跟代码核对，夸大是主要被打回原因。
+
+name: <owner>/<repo>
+url: https://github.com/<owner>/<repo>
+category: identity
+description:
+  en: 'Per-model system prompt for DSH: the injected persona follows the current model, either appended or fully replacing the prompt except tools. Config edits take effect on the next step without a restart.'
+  zh: '按当前模型切换 DSH 系统提示词：人格跟随当前模型，可追加，也可除工具外整体替换。改配置下一步生效，免重启。'

@@ -1,0 +1,18 @@
+# 过程性文档（本地留档，不进公开仓库）
+docs/
+
+# 依赖与构建产物不进 git
+node_modules/
+
+# 运行期状态（本机数据，不是代码）
+last-model.json
+last-assembly.json
+
+# 日志与临时文件
+*.log
+npm-debug.log*
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
+desktop.ini
