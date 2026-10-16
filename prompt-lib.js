@@ -208,6 +208,51 @@ export function normalizeModelCatalog(raw) {
 }
 
 /**
+ * 读提示词库（独立文件，与 config.json 分离）。
+ *
+ * 为什么分离：库是「可复用的素材」，映射是「哪个模型用哪条」。
+ * 两者混在一个文件里，改映射时要连素材一起翻，且容易误删。
+ *
+ * 任何异常都降级成「只有内置条目」，绝不抛 —— 库读不出来不该让人格失效。
+ *
+ * @param {object} fs  node:fs（可注入假实现用于测试）
+ * @param {string} file  prompts.json 绝对路径
+ * @returns {Array} 归一化后的库
+ */
+export function readLibrary(fs, file) {
+  try {
+    const raw = fs.readFileSync(file, 'utf8')
+    return normalizeLibrary(JSON.parse(raw))
+  } catch {
+    // 文件不存在 / 坏 JSON / 不是数组 → 回到纯内置
+    return normalizeLibrary(null)
+  }
+}
+
+/**
+ * 写提示词库（原子替换，与 writeConfigAtomic 同策略）。
+ * @returns {{ok:true} | {ok:false, error:string}}
+ */
+export function writeLibrary(fs, file, library) {
+  const i = Math.max(file.lastIndexOf('/'), file.lastIndexOf('\\'))
+  const dir = i <= 0 ? '.' : file.slice(0, i)
+  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`
+  try {
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(tmp, JSON.stringify(library, null, 2) + '\n', 'utf8')
+    fs.renameSync(tmp, file)
+    return { ok: true }
+  } catch (e) {
+    try {
+      fs.unlinkSync(tmp)
+    } catch {
+      /* 临时文件可能没建起来 */
+    }
+    return { ok: false, error: (e && e.message) || String(e) }
+  }
+}
+
+/**
  * 从 profile 的 cordis.patch.yml 里**定向提取**模型目录（id + 人话 name）。
  *
  * 为什么自己扫而不是用 YAML 解析器：保持**零依赖**。只认 `llm-pi-ai` 段下

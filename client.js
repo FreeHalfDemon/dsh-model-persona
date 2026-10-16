@@ -80,6 +80,8 @@ window.__ModuleLoader__.load({
       libraryNew: '新建条目',
       libraryName: '条目名',
       libraryBuiltin: '内置',
+      edit: '编辑',
+      cancel: '取消',
       useCurrent: '用当前模型',
       loadFail: '读不到插件状态',
       advanced: '高级选项',
@@ -142,6 +144,8 @@ window.__ModuleLoader__.load({
       libraryNew: 'New entry',
       libraryName: 'Entry name',
       libraryBuiltin: 'Built-in',
+      edit: 'Edit',
+      cancel: 'Cancel',
       useCurrent: 'Use current model',
       loadFail: 'Cannot read plugin state',
       advanced: 'Advanced',
@@ -238,6 +242,22 @@ window.__ModuleLoader__.load({
       if (!j.ok) throw new Error(j.error || 'save failed')
       return true
     }
+    async function getLibrary() {
+      const r = await fetch(`${API}/library`, { headers: { accept: 'application/json' } })
+      const j = await r.json()
+      if (!j.ok) throw new Error(j.error || 'library failed')
+      return Array.isArray(j.library) ? j.library : []
+    }
+    async function postLibrary(payload) {
+      const r = await fetch(`${API}/library`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-model-persona': '1' },
+        body: JSON.stringify(payload),
+      })
+      const j = await r.json()
+      if (!j.ok) throw new Error(j.error || 'library failed')
+      return Array.isArray(j.library) ? j.library : []
+    }
     async function postCatalog(catalog) {
       const r = await fetch(`${API}/catalog`, {
         method: 'POST',
@@ -278,6 +298,7 @@ window.__ModuleLoader__.load({
       const [catalogDraft, setCatalogDraft] = React.useState('')
       const [assembly, setAssembly] = React.useState(null)
       const [assemblyError, setAssemblyError] = React.useState('')
+      const [library, setLibrary] = React.useState([])
 
       const load = React.useCallback(async () => {
         try {
@@ -289,6 +310,15 @@ window.__ModuleLoader__.load({
           setMsg({ kind: 'err', text: `${t('loadFail')}: ${e.message}` })
         }
       }, [t])
+
+      // 提示词库：与 state 分开拉，失败不影响面板其余部分
+      const loadLibrary = React.useCallback(async () => {
+        try {
+          setLibrary(await getLibrary())
+        } catch {
+          setLibrary([])
+        }
+      }, [])
 
       // 真实装配预览：与 state 分开拉，失败不影响面板其余部分
       const loadAssembly = React.useCallback(async (model) => {
@@ -310,6 +340,42 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         if (state && state.model) loadAssembly(state.model)
       }, [state, loadAssembly])
+
+      React.useEffect(() => {
+        loadLibrary()
+      }, [loadLibrary])
+
+      /** 库条目存盘（新建或编辑）。内置条目也允许编辑内容，但不允许改 source。 */
+      const onSaveLib = async () => {
+        if (!libDraft || !libDraft.text.trim()) return
+        setBusy(true)
+        setMsg(null)
+        try {
+          const payload = libDraft.id
+            ? { id: libDraft.id, name: libDraft.name, text: libDraft.text }
+            : { name: libDraft.name, text: libDraft.text }
+          setLibrary(await postLibrary({ action: 'upsert', prompt: payload }))
+          setLibDraft(null)
+          setMsg({ kind: 'ok', text: t('saved') })
+        } catch (e) {
+          setMsg({ kind: 'err', text: `${t('failed')}: ${e.message}` })
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const onRemoveLib = async (id) => {
+        setBusy(true)
+        setMsg(null)
+        try {
+          setLibrary(await postLibrary({ action: 'remove', id }))
+          setMsg({ kind: 'ok', text: t('saved') })
+        } catch (e) {
+          setMsg({ kind: 'err', text: `${t('failed')}: ${e.message}` })
+        } finally {
+          setBusy(false)
+        }
+      }
 
       if (!bundle || !draft) {
         return h('div', { 'data-dmp': '' }, h('p', { className: 'dmp-sub' }, '…'))
@@ -612,6 +678,60 @@ window.__ModuleLoader__.load({
             h('p', { className: 'dmp-sub' }, t('assemblyHint')),
           ),
         assemblyError && h('p', { className: 'dmp-sub' }, `${t('assemblyFail')}: ${assemblyError}`),
+
+        // ⑥b 提示词库管理（v4）
+        h('hr', { className: 'dmp-sep' }),
+        h(
+          'div',
+          { className: 'dmp-card-head' },
+          h('span', { className: 'dmp-label' }, `${t('library')} (${library.length})`),
+          h('button', { onClick: () => setLibDraft({ id: '', name: '', text: '' }) }, t('libraryNew')),
+        ),
+        library.length === 0 && h('p', { className: 'dmp-sub' }, t('libraryEmpty')),
+        ...library.map((p) =>
+          libDraft && libDraft.id === p.id
+            ? h(
+                'div',
+                { className: 'dmp-card', key: p.id },
+                h(
+                  'div',
+                  { className: 'dmp-field' },
+                  h('span', { className: 'dmp-label' }, t('libraryName')),
+                  h('input', {
+                    type: 'text',
+                    value: libDraft.name,
+                    onChange: (e) => setLibDraft({ ...libDraft, name: e.target.value }),
+                  }),
+                ),
+                h('textarea', {
+                  value: libDraft.text,
+                  onChange: (e) => setLibDraft({ ...libDraft, text: e.target.value }),
+                }),
+                h(
+                  'div',
+                  { className: 'dmp-row' },
+                  h('button', { className: 'dmp-primary', disabled: busy, onClick: onSaveLib }, t('save')),
+                  h('button', { onClick: () => setLibDraft(null) }, t('cancel')),
+                ),
+              )
+            : h(
+                'div',
+                { className: 'dmp-card', key: p.id },
+                h(
+                  'div',
+                  { className: 'dmp-librow' },
+                  h('span', { className: 'dmp-libname', title: p.name }, p.name || p.id),
+                  h(
+                    'div',
+                    { className: 'dmp-row' },
+                    p.source === 'builtin' && h('span', { className: 'dmp-chip' }, t('libraryBuiltin')),
+                    h('button', { onClick: () => setLibDraft({ id: p.id, name: p.name, text: p.text }) }, t('edit')),
+                    p.source !== 'builtin' &&
+                      h('button', { className: 'dmp-danger', disabled: busy, onClick: () => onRemoveLib(p.id) }, t('remove')),
+                  ),
+                ),
+              ),
+        ),
 
         // ⑥ 高级选项（默认收起，避免 v3 那种「选项堆砌」）
         h('hr', { className: 'dmp-sep' }),

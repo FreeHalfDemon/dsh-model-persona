@@ -26,6 +26,7 @@ import {
   writeConfigAtomic,
   summarizeAssembly,
 } from './core.js'
+import { upsertPrompt, removePrompt } from './prompt-lib.js'
 
 const PREFIX = '/model-persona'
 const LOG = '[model-persona]'
@@ -87,6 +88,9 @@ export function registerPanelRoutes(scope, deps) {
     modelCatalog = { models: [], source: 'none', error: '' },
     setCatalog = () => {},
     assemblePreview = null,
+    // 库读写由调用方注入：panel-host 不直接碰 fs，便于单测与替换
+    readLibrary = () => [],
+    writeLibrary = () => ({ ok: true }),
     warn = () => {},
   } = deps
 
@@ -217,6 +221,61 @@ export function registerPanelRoutes(scope, deps) {
     )
   } catch (e) {
     warn(`${LOG} 注册 /catalog 失败：${(e && e.message) || e}`)
+  }
+
+  // ②c 提示词库：读 + 增删改
+  //
+  // 库存在独立文件（prompts.json），与 config.json 分离 —— 库是「可复用素材」，
+  // 映射是「哪个模型用哪条」，混在一起改映射时会误删素材。
+  // 内置条目由 prompt-lib 保护：删不掉，误删会自动恢复。
+  try {
+    disposers.push(
+      webServer.register({
+        kind: 'exact',
+        path: `${PREFIX}/library`,
+        handler: guard(async (req, res) => {
+          if (req.method === 'GET') {
+            return sendJson(res, 200, { ok: true, library: readLibrary() })
+          }
+          if (req.method !== 'POST') {
+            return sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          }
+          if (req.headers['x-model-persona'] !== '1') {
+            return sendJson(res, 403, { ok: false, error: 'missing X-Model-Persona header' })
+          }
+          const ctype = String(req.headers['content-type'] || '')
+          if (!ctype.includes('application/json')) {
+            return sendJson(res, 415, { ok: false, error: 'content-type must be application/json' })
+          }
+          const raw = await readBody(req)
+          let parsed
+          try {
+            parsed = JSON.parse(raw)
+          } catch {
+            return sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' })
+          }
+          // action: 'upsert' | 'remove'
+          const action = parsed && parsed.action
+          try {
+            if (action === 'upsert') {
+              const w = writeLibrary(upsertPrompt(readLibrary(), parsed.prompt))
+              if (!w.ok) return sendJson(res, 500, { ok: false, error: `写盘失败：${w.error}` })
+            } else if (action === 'remove') {
+              const w = writeLibrary(removePrompt(readLibrary(), parsed.id))
+              if (!w.ok) return sendJson(res, 500, { ok: false, error: `写盘失败：${w.error}` })
+            } else {
+              return sendJson(res, 400, { ok: false, error: `未知操作：${action}` })
+            }
+          } catch (e) {
+            // upsertPrompt 对空文本等会抛，转成 400 而不是 500
+            return sendJson(res, 400, { ok: false, error: (e && e.message) || '操作失败' })
+          }
+          sendJson(res, 200, { ok: true, library: readLibrary() })
+        }),
+      }),
+    )
+  } catch (e) {
+    warn(`${LOG} 注册 /library 失败：${(e && e.message) || e}`)
   }
 
   // ③ 真实装配预览：调 ctx.systemPrompt.assemble() 拿真结果，逐段列出来

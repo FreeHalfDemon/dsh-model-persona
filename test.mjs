@@ -500,6 +500,8 @@ import {
   removePrompt,
   findPrompt,
   parseModelCatalog,
+  readLibrary,
+  writeLibrary,
 } from './prompt-lib.js'
 
 test('BUILTIN_PROMPTS：三条内置，id 均以 builtin- 开头', () => {
@@ -1017,4 +1019,138 @@ test('summarizeAssembly：不改入参', () => {
   const snap = JSON.stringify(asm)
   summarizeAssembly(asm, { ownSection: 'model-persona:main' })
   assert.equal(JSON.stringify(asm), snap)
+})
+
+// ── 提示词库持久化（readLibrary / writeLibrary） ────────────
+
+
+function fakeFs(initial = {}) {
+  const files = { ...initial }
+  const calls = []
+  return {
+    files,
+    calls,
+    readFileSync: (p) => {
+      if (!(p in files)) throw new Error(`ENOENT: ${p}`)
+      return files[p]
+    },
+    writeFileSync: (p, t) => {
+      calls.push(['write', p])
+      files[p] = t
+    },
+    renameSync: (a, b) => {
+      calls.push(['rename', a, b])
+      files[b] = files[a]
+      delete files[a]
+    },
+    mkdirSync: (d) => calls.push(['mkdir', d]),
+    unlinkSync: (p) => {
+      calls.push(['unlink', p])
+      delete files[p]
+    },
+  }
+}
+
+test('★ readLibrary：文件不存在 → 回到纯内置（不抛）', () => {
+  const fs = fakeFs()
+  const lib = readLibrary(fs, '/nonexistent/prompts.json')
+  assert.ok(Array.isArray(lib))
+  assert.ok(lib.length >= 3)
+  assert.ok(lib.some((e) => e.id === 'builtin-concise'))
+})
+
+test('readLibrary：坏 JSON → 回到纯内置', () => {
+  const fs = fakeFs({ '/x/prompts.json': '{ 这不是 json' })
+  const lib = readLibrary(fs, '/x/prompts.json')
+  assert.ok(lib.some((e) => e.id === 'builtin-concise'))
+})
+
+test('readLibrary：不是数组 → 抛错被吞，回到纯内置', () => {
+  const fs = fakeFs({ '/x/prompts.json': '{"a":1}' })
+  const lib = readLibrary(fs, '/x/prompts.json')
+  assert.ok(lib.some((e) => e.id === 'builtin-concise'))
+})
+
+test('★ readLibrary：正常读出自定义条目 + 内置兜底', () => {
+  const fs = fakeFs({
+    '/x/prompts.json': JSON.stringify([
+      { id: 'mine', name: '我的', text: '我的提示词' },
+      { id: 'builtin-concise', text: '被改过的内置', source: 'manual' },
+    ]),
+  })
+  const lib = readLibrary(fs, '/x/prompts.json')
+  assert.ok(lib.some((e) => e.id === 'mine' && e.text === '我的提示词'))
+  // 内置条目被改坏也要恢复
+  assert.equal(lib.find((e) => e.id === 'builtin-concise').text, '被改过的内置',
+    '用户显式写了的版本优先（normalizeLibrary 不去改已有 id 的内容）')
+})
+
+test('★ readLibrary：内置条目被整个删掉会自动恢复', () => {
+  const fs = fakeFs({ '/x/prompts.json': JSON.stringify([{ id: 'only', text: '只有我' }]) })
+  const lib = readLibrary(fs, '/x/prompts.json')
+  for (const b of BUILTIN_PROMPTS) {
+    assert.ok(lib.some((e) => e.id === b.id), `${b.id} 应被恢复`)
+  }
+})
+
+test('★ writeLibrary：走临时文件 + rename（原子替换）', () => {
+  const fs = fakeFs()
+  const r = writeLibrary(fs, '/x/prompts.json', [{ id: 'a', text: 'A' }])
+  assert.equal(r.ok, true)
+  const wrote = fs.calls.find((c) => c[0] === 'write')
+  assert.ok(wrote[1].startsWith('/x/prompts.json.tmp-'), '应先写临时文件')
+  const renamed = fs.calls.find((c) => c[0] === 'rename')
+  assert.equal(renamed[2], '/x/prompts.json')
+  assert.ok(!fs.calls.some((c) => c[0] === 'unlink'), '成功路径不该清理')
+})
+
+test('writeLibrary：写盘内容带 2 空格缩进 + 末尾换行', () => {
+  const fs = fakeFs()
+  writeLibrary(fs, '/x/prompts.json', [{ id: 'a', text: 'A' }])
+  const body = fs.files['/x/prompts.json']
+  assert.ok(body.endsWith('\n'), '末尾要有换行')
+  // 数组元素在 indent=2 下处于第 4 个空格（数组本身占一级）
+  assert.ok(body.includes('\n    "id"'), '应 2 空格缩进（数组元素故为 4 空格）')
+  assert.deepEqual(JSON.parse(body), [{ id: 'a', text: 'A' }], '必须能解析回原值')
+})
+
+test('writeLibrary：mkdir 用递归，目录已存在也不炸', () => {
+  const fs = fakeFs()
+  fs.mkdirSync = () => {} // 不抛就是成功
+  const r = writeLibrary(fs, '/deep/nested/prompts.json', [{ id: 'a', text: 'A' }])
+  assert.equal(r.ok, true)
+})
+
+test('★ writeLibrary：写失败时清理临时文件并返回错误', () => {
+  const fs = fakeFs()
+  fs.writeFileSync = () => { throw new Error('disk full') }
+  const r = writeLibrary(fs, '/x/prompts.json', [])
+  assert.equal(r.ok, false)
+  assert.match(r.error, /disk full/)
+  assert.ok(fs.calls.some((c) => c[0] === 'unlink'), '应尝试清理临时文件')
+})
+
+test('★ writeLibrary → readLibrary 往返无损', () => {
+  const fs = fakeFs()
+  const lib = normalizeLibrary([
+    { id: 'a', name: 'A', text: '文本A' },
+    { id: 'b', name: 'B', text: '文本B', source: 'web', url: 'http://example.invalid/x' },
+  ])
+  const w = writeLibrary(fs, '/x/prompts.json', lib)
+  assert.equal(w.ok, true)
+  const back = readLibrary(fs, '/x/prompts.json')
+  assert.equal(back.length, lib.length)
+  const a = back.find((e) => e.id === 'a')
+  const b = back.find((e) => e.id === 'b')
+  assert.equal(a.text, '文本A')
+  assert.equal(b.source, 'web')
+  assert.equal(b.url, 'http://example.invalid/x')
+})
+
+test('writeLibrary：Windows 风格路径也能正确取目录', () => {
+  const fs = fakeFs()
+  const dirs = []
+  fs.mkdirSync = (d) => dirs.push(d)
+  writeLibrary(fs, 'C:\\some\\dir\\prompts.json', [])
+  assert.deepEqual(dirs, ['C:\\some\\dir'], '反斜杠路径要能取对目录')
 })

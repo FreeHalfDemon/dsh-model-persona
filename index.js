@@ -22,6 +22,7 @@
  */
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { readFileSync, mkdirSync, writeFileSync, renameSync, unlinkSync } from 'node:fs'
 import {
   configPaths,
   stateDir,
@@ -34,7 +35,11 @@ import {
   DEFAULT_CONFIG,
 } from './core.js'
 import { registerPanelRoutes } from './panel-host.js'
-import { normalizeModelCatalog } from './prompt-lib.js'
+import {
+  normalizeModelCatalog,
+  readLibrary as libReadLibrary,
+  writeLibrary as libWriteLibrary,
+} from './prompt-lib.js'
 import { summarizeAssembly } from './core.js'
 
 export const name = 'dsh-model-persona'
@@ -77,6 +82,30 @@ export function apply(ctx) {
   }
 
   const boot = safeRead()
+
+  /**
+   * ⑤ 提示词库的持久化（v4）。库独立于 config.json，放同目录的 prompts.json。
+   * 读写都走 prompt-lib 的纯函数，任何异常降级成「只有内置条目」。
+   */
+  const libraryPath = path.join(stateDir(PLUGIN_DIR), 'prompts.json')
+  const readLibrary = () => {
+    try {
+      return libReadLibrary({ readFileSync, mkdirSync, writeFileSync, renameSync, unlinkSync }, libraryPath)
+    } catch {
+      return []
+    }
+  }
+  const writeLibrary = (lib) => {
+    try {
+      return libWriteLibrary(
+        { readFileSync, mkdirSync, writeFileSync, renameSync, unlinkSync },
+        libraryPath,
+        lib,
+      )
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || String(e) }
+    }
+  }
 
   /**
    * ③ 模型目录（v4 模型下拉框的数据源，**双轨**）。
@@ -263,6 +292,8 @@ export function apply(ctx) {
           modelCatalog,
           setCatalog: (raw) => applyCatalog(raw, 'fallback'),
           assemblePreview,
+          readLibrary,
+          writeLibrary,
           warn,
         })
         scope.effect(() => dispose, 'dsh-model-persona.panel-routes()')
