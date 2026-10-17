@@ -172,8 +172,10 @@ export function findPrompt(library, id) {
  * 为什么不在这一层读文件/调服务：保持它是**纯函数**，可单测、可在浏览器里跑
  * （面板拿到的数据可能是服务返回的，也可能是用户粘贴的，一律走这里）。
  *
- * 认两种输入形态：
- *   ① ModelCatalog：{ providers: [{ id, name, models: [{id, name}] }] }
+ * 认三种输入形态：
+ *   ① ModelCatalog：{ groups: [...] } 或 { providers: [...] }
+ *      ⚠️ 官方这个字段改过名：早期源码是 `providers`，现行 master 是 `groups`
+ *      （buildModelCatalog 的返回值）。两个都要认，否则换版本就静默解析出空。
  *   ② 扁平数组：   [{ id, name }]
  * 其它形态（null / 字符串 / 空数组）一律返回 []，绝不抛。
  *
@@ -195,14 +197,25 @@ export function normalizeModelCatalog(raw) {
     for (const m of raw) push(m)
     return out
   }
-  if (isPlainObject(raw) && Array.isArray(raw.providers)) {
-    for (const g of raw.providers) {
-      if (!isPlainObject(g) || !Array.isArray(g.models)) continue
-      for (const m of g.models) push(m)
+  if (isPlainObject(raw)) {
+    // 官方字段名在版本间变过：现行是 `groups`，早期是 `providers`。都认。
+    // 非空才优先：空数组也算「没给」，这样老版本（只有 providers）仍能回退
+    const groups = Array.isArray(raw.groups) && raw.groups.length
+      ? raw.groups
+      : Array.isArray(raw.providers)
+        ? raw.providers
+        : Array.isArray(raw.groups)
+          ? raw.groups
+          : null
+    if (groups) {
+      for (const g of groups) {
+        if (!isPlainObject(g) || !Array.isArray(g.models)) continue
+        for (const m of g.models) push(m)
+      }
+      // 目录自带的 default 也可能不在任何组里，补上以免漏选
+      if (isPlainObject(raw.default) && raw.default.id) push(raw.default)
+      return out
     }
-    // 目录自带的 default 也可能不在任何 provider 组里，补上以免漏选
-    if (isPlainObject(raw.default) && raw.default.id) push(raw.default)
-    return out
   }
   return out
 }

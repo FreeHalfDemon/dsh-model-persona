@@ -1298,3 +1298,42 @@ test('/fetch：有服务时才校验 URL', async () => {
   await routes['/model-persona/fetch'](req, res)
   assert.equal(code, 400, '有服务时非法 URL 才该 400')
 })
+
+// ── ModelCatalog 字段名跨版本兼容（真环境踩到） ─────────────
+// 官方 buildModelCatalog 现行返回 { default, routableProviders, groups, failures }，
+// 早期 types.ts 里叫 providers。只认一个就会在换版本后静默解析出空。
+test('★ normalizeModelCatalog：认官方的 groups 字段', () => {
+  const cat = {
+    default: { provider: 'cn-cli', model: 'cn-cli/deepseek-v4.1-flash' },
+    routableProviders: ['cn-cli'],
+    groups: [
+      { id: 'cn-cli', name: 'CN CLI', models: [{ id: 'cn-cli/deepseek-v4.1-flash', name: 'V4.1 Flash' }] },
+    ],
+    failures: [],
+  }
+  const out = normalizeModelCatalog(cat)
+  assert.equal(out.length >= 1, true, 'groups 形态必须能解析出来')
+  assert.ok(out.some((m) => m.id === 'cn-cli/deepseek-v4.1-flash'))
+})
+
+test('normalizeModelCatalog：groups 与 providers 同时存在时优先 groups', () => {
+  const out = normalizeModelCatalog({
+    groups: [{ id: 'g', models: [{ id: 'from/groups', name: 'G' }] }],
+    providers: [{ id: 'p', models: [{ id: 'from/providers', name: 'P' }] }],
+  })
+  assert.ok(out.some((m) => m.id === 'from/groups'))
+  assert.ok(!out.some((m) => m.id === 'from/providers'), '有 groups 就不看 providers')
+})
+
+test('normalizeModelCatalog：空 groups 数组时回退看 providers', () => {
+  const out = normalizeModelCatalog({
+    groups: [],
+    providers: [{ id: 'p', models: [{ id: 'a/b', name: 'AB' }] }],
+  })
+  assert.ok(out.some((m) => m.id === 'a/b'), 'groups 为空应回退 providers（老版本兼容）')
+})
+
+test('normalizeModelCatalog：真实失败形态（groups 缺失、只有 failures）解析为空但不抛', () => {
+  const cat = { default: {}, routableProviders: [], failures: [{ id: 'x', message: 'no key' }] }
+  assert.deepEqual(normalizeModelCatalog(cat), [])
+})

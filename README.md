@@ -120,7 +120,7 @@ plugin_manager({ action: "install_bundle", target: "/absolute/path/to/dsh-model-
 ```sh
 cd /path/to/dsh-model-persona
 node --check index.js core.js panel-host.js prompt-lib.js client.js
-node test.mjs        # 153 条测试，应看到 "pass 153 / fail 0"
+node test.mjs        # 157 条测试，应看到 "pass 157 / fail 0"
 ```
 
 > `node test.mjs` 而不是 `node --test`：后者会 spawn 子进程，在受限沙箱里可能被拦。

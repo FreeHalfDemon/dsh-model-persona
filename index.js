@@ -131,10 +131,21 @@ export function apply(ctx) {
       const models = normalizeModelCatalog(raw)
       modelCatalog.models = models
       modelCatalog.source = models.length ? source : 'none'
-      if (!models.length) modelCatalog.error = '目录为空'
-      else modelCatalog.error = ''
+      if (!models.length) {
+        // 官方 ModelCatalog 带 failures：某个 provider 拉模型失败会记在这里。
+        // 把原因透给面板，用户才知道是「没配 provider」还是「服务没就绪」。
+        const fails = Array.isArray(raw && raw.failures) ? raw.failures : []
+        const detail = fails
+          .map((f) => `${(f && f.id) || '?'}: ${(f && f.message) || '未知错误'}`)
+          .join('；')
+        modelCatalog.error = detail ? `目录为空（provider 失败：${detail}）` : '目录为空'
+      } else {
+        modelCatalog.error = ''
+      }
       if (models.length) {
         warn(`${LOG} 模型目录已加载（${source}）：${models.length} 个模型`)
+      } else {
+        warn(`${LOG} 模型目录为空：${modelCatalog.error}`)
       }
     } catch (e) {
       modelCatalog.error = (e && e.message) || String(e)
