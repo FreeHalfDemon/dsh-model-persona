@@ -320,15 +320,18 @@ export function registerPanelRoutes(scope, deps) {
           } catch {
             return sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' })
           }
-          const url = parsed && typeof parsed.url === 'string' ? parsed.url.trim() : ''
-          if (!/^https?:\/\//i.test(url)) {
-            return sendJson(res, 400, { ok: false, error: '只接受 http/https 链接' })
-          }
+          // ⚠️ 先判「能力有没有」再判「参数对不对」。
+          // 反过来会让「本机没 ctx.web」伪装成「你 URL 填错了」——
+          // 实测踩过：传 https://example.invalid 得到 400，误以为服务可用。
           if (typeof fetchPrompt !== 'function') {
             return sendJson(res, 503, {
               ok: false,
-              error: '本机没有可用的联网抓取服务，请手动粘贴提示词',
+              error: '本机没有可用的联网抓取服务（ctx.web.fetch 不可用），请在下方手动粘贴提示词',
             })
+          }
+          const url = parsed && typeof parsed.url === 'string' ? parsed.url.trim() : ''
+          if (!/^https?:\/\//i.test(url)) {
+            return sendJson(res, 400, { ok: false, error: '只接受 http/https 链接' })
           }
           try {
             const out = await fetchPrompt(url)

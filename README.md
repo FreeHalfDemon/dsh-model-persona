@@ -1,173 +1,152 @@
-# dsh-model-persona —— 按模型换人格
+# dsh-model-persona
 
-**当前模型变了，注入的系统提示词跟着变。** 改配置文件**下一步生效、免重启**。
+**当前模型变了，注入的系统提示词跟着变。** 一个模型一套人格：写完保存，**下一步生效、免重启**。
 
-两种模式：
-
-| 模式 | 行为 |
-|---|---|
-| `append` | 往系统提示词里**追加**一段人格（安全，默认） |
-| `replace` | 把整个系统提示词**换掉**，只保留工具（工具 schema + 工具使用指导） |
-
-- 触发条件：**当前模型**（不是手动切预设、不是按工作区）
-- 零运行时依赖，纯 ESM
-- 带网页设置面板，不用碰 JSON
+- **按模型分流** —— 不是手动切预设，是宿主真实模型 id 一变，注入内容自动跟着变
+- **两种模式** —— 追加（安全）或整段替换（除工具外全换）
+- **网页设置面板** —— 模型下拉框、提示词库、真实装配预览，不用碰 JSON
+- **零运行时依赖** —— 纯 ESM，不装第三方包
+- **提示词可复用** —— 库里的条目被多个模型引用，改一处全生效
 
 ---
 
-## ⚠️ 第一条：按模型写关键词，必须写「真实模型 id」
+## 工作原理
 
-**界面上的显示名不是宿主传给插件的模型 id。** 二者不是同一套命名，照显示名写关键词
-永远命中不了，而且不报错、不告警。
+`dsh-model-persona` 复用 DSH 的能力接缝，不重新发明：
 
-真实 id 有几种拿法：
+| DSH 能力 | 插件用法 |
+|---|---|
+| `ctx.systemPrompt.section()` | `append` 模式：注册一个人格段，段文本**每步求值** |
+| `system-prompt/assemble` waterfall | `replace` 模式：整体替换 sections，返回值权威 |
+| `ctx.sessionController.modelCatalog()` | 取运行时模型目录（`id` + 人话 `name`），喂模型下拉框 |
+| `ctx.webServer.register()` | 提供 6 条面板数据路由 `/model-persona/*` |
+| `ctx.web.fetch()` | 「从网址导入」提示词（可选服务，没有则提示手贴） |
+| 文件系统 | 配置与提示词库落在 `$DSH_HOME/model-persona/` |
 
-1. **面板里直接看** —— 设置页会显示「当前真实模型 id」，一键填进键
-2. **看落盘文件** —— 跑过一轮对话后，读 `$DSH_HOME/model-persona/last-model.json`
-   ```json
-   { "model": "<真实 id>", "at": "2026-01-01T00:00:00.000Z" }
-   ```
+**数据流**：模型 id（每步求值）→ 匹配 `byModel` → 渲染人格文本 → 注入系统提示词。
 
-> 真实 id **随部署 / provider 配置而变**，务必现读，别照抄任何文档里的例子。
+**匹配优先级**：精确键（忽略大小写）→ 最长子串 → 退回 `default`。
+
+> 为什么不用官方的 `complete: true`：它是**注册期静态开关**，一挂上就接管所有模型，
+> 做不到「只对写了覆盖的模型生效」；且官方源码里它发生在 waterfall **之后**，
+> 会覆盖掉 waterfall 的结果，两者不能叠加。
+
+## Web UI
+
+两个形态（v4 已砍掉浮层面板和三形态切换器）：
+
+| 位置 | 内容 |
+|---|---|
+| 设置 → 插件 → 「按模型换人格」 | 完整编辑：模型下拉框、模式、映射列表、提示词库、真实装配预览、高级项 |
+| 输入框下方状态条 | 只看状态（当前命中哪条映射），三种颜色区分 关闭 / 追加 / 替换 |
+
+面板数据链路：浏览器 `fetch` → `/model-persona/*` 六条路由 → Host 内存/磁盘。样式只用官方主题 token（`--dsw-alias-*`），不引入自带配色。
+
+## 安装
+
+```sh
+# 用官方 plugin_manager（推荐，不要手写 cordis.patch.yml、不要跑 pnpm）
+# 在 DSH 会话里调用工具：
+plugin_manager({ action: "install_bundle", target: "/absolute/path/to/dsh-model-persona" })
+```
+
+安装后 `plugin_manager` 会把包名写进该 profile 的 `dependencies` 与 `dsh.profile.bundles`。
+
+> **生效时机**：安装本身要重启 DSH 才加载（Node 模块缓存）。之后改 `config.json`
+> 里的映射/文本**不用重启**，下一步就生效。只有改 `sectionName` / `order`
+> 或增删挂载行才需要重启。
+
+**卸载**：`plugin_manager({ action: "remove_bundle", target: "dsh-model-persona" })`
+**临时关**：`set_plugin` 把该行置 `enabled: false`
 
 ## 配置
 
-**两种改法**：网页设置面板（推荐）或直接改 JSON 文件。
+配置文件：`$DSH_HOME/model-persona/config.json`（首次运行自动生成）。
 
-### 网页面板
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `enabled` | `true` | 总开关；`false` = 完全不注入 |
+| `mode` | `"append"` | `append`（追加）\| `replace`（除工具外全换） |
+| `default` | `""` | 兜底条目；字符串或对象均可 |
+| `byModel` | `{}` | 按模型映射；值是字符串、`{text}` 或 `{promptId}` |
+| `order` | `1` | append 段的排序位置 |
+| `sectionName` | `"model-persona:main"` | 段名（同层唯一，撞了就改这个） |
+| `replaceContexts` | `false` | replace 模式下是否连运行上下文一起清 |
+| `debug` | `false` | 把本次 assembly 的段名落盘到 `last-assembly.json` 供排查 |
 
-装好后在 DSH 网页里 **设置 → 插件 → 「按模型换人格」** 即可，不用碰 JSON。
-
-面板里能：编辑按模型映射 · 看**当前真实模型 id**（一键填进键）· 切 append/replace ·
-**实时预览**当前模型会注入什么。
-
-### 直接改文件
-
-```
-$DSH_HOME/model-persona/config.json
-```
-
-### append 模式（安全，往提示词里加一段）
-
-```jsonc
-{
-  "mode": "append",
-  "default": "（所有模型通用的兜底人格）",
-  "byModel": {
-    "some-model-id": "你是简洁高效的工程助手：先给结论，再给依据。",
-    "other-model-id": "你是严谨的资深工程师：先质疑需求，再给方案。"
-  }
-}
-```
-
-### replace 模式（除工具外全换）
+**映射条目三种写法**（v4 新增后两种）：
 
 ```jsonc
 {
   "mode": "replace",
   "byModel": {
-    "some-model-id": {
-      "text": "你运行在这个模型上。先给结论，再给依据，不铺垫。",
-      "keepSections": []          // 想额外保留哪些原有段，见下
-    },
-    "other-model-id": { "text": "..." }
+    "some-model-id": "直接写一段文本",                    // ① 内联字符串
+    "other-model-id": { "text": "内联一段" },             // ② 内联对象
+    "third-model-id": { "promptId": "builtin-concise" }   // ③ 引用提示词库
   }
 }
 ```
 
-`replace` 模式下**保留什么**：
+提示词库（`$DSH_HOME/model-persona/prompts.json`）与配置**分开存**：库是可复用素材，
+映射是「哪个模型用哪条」。内置条目删不掉，误删会自动恢复。
 
-| 保留 | 不保留 |
-|---|---|
-| ✅ `tools` schema（模型仍知道有哪些工具） | ❌ harness 身份段 |
-| ✅ `tool:*` 段（文字版工具使用指导） | ❌ deployment persona |
-| ✅ 运行上下文（`contexts`：cwd / 沙箱 / 审批）默认保留 | ❌ plan policy、文件引用等其余段 |
+## 使用
 
-- `keepSections: ["plan:policy"]` 可**额外保留**指定段；`"前缀*"` 是通配
-- `"replaceContexts": true` 可连运行上下文一起清（**不建议**，见下）
+装好后打开 **设置 → 插件 → 「按模型换人格」**：
 
-### 匹配规则
+1. 面板顶部显示**当前真实模型 id**（这就是要匹配的值）
+2. 「按模型映射」区点「新增一条」→ 从**模型下拉框**选模型（显示人话名，内部存真实 id）
+3. 选提示词来源：内联一段文本，或引用提示词库里的条目
+4. 「真实装配预览」会告诉你：一共几个段、本插件那段占多少字符、工具还在不在
 
-**精确键（忽略大小写）→ 最长子串 → 回退 `default`**
+> 下拉框里的模型来自 `ctx.sessionController.modelCatalog()`。如果你的部署没有这个服务，
+> 面板会显示手贴目录的输入框，也可以直接手打模型 id。
 
-- 键 `claude` 会命中 `claude-opus-4.6`、`claude-sonnet-4.6`（子串匹配）
-- 键同时有 `flash` 和 `deepseek-flash` 时，`deepseek-flash-high` 命中**更长的**
-  `deepseek-flash`（不会错命中短键）
-- 都没命中 → 用 `default`；`default` 也空 → **不注入**
+## 验证
 
-### 改了怎么生效
+### 0. 已在真实实例上验证
 
-改 `config.json` → **下一步立即生效**。只有改 `sectionName` / `order` 或增删挂载行才需重启 DSH。
+本插件在 DSH 0.2.0-rc.2 / web profile 上实测：
 
-## 完整配置键
+- 六条路由全部注册成功（实测状态码）：
+  `/model-persona/state` `200` · `/config` `200`（POST）· `/library` `200` ·
+  `/preview` `200` · `/catalog` `400`（POST，空目录被拒）· `/fetch` `400`（POST，非法 URL 被拒）
+- 段被真实调用：`$DSH_HOME/model-persona/last-model.json` 按会话持续刷新
+- 真环境暴露并修掉两个问题：模型目录在加载期为空（改懒拉取）、
+  模型 id 前缀随部署变化导致映射不命中
 
-| 键 | 默认 | 说明 |
+### 1. 离线验证（不启动任何服务）
+
+```sh
+cd /path/to/dsh-model-persona
+node --check index.js core.js panel-host.js prompt-lib.js client.js
+node test.mjs        # 153 条测试，应看到 "pass 153 / fail 0"
+```
+
+> `node test.mjs` 而不是 `node --test`：后者会 spawn 子进程，在受限沙箱里可能被拦。
+
+### 2. 端到端验证（需要重启服务）
+
+```sh
+# 装好后重启 dsh，然后在面板里操作，或直接打接口：
+curl http://127.0.0.1:3080/model-persona/state
+# 应看到 ok:true、state.model 是真实模型 id、models 非空
+```
+
+**面板自查清单**：模型下拉框有内容吗 / 选中后映射键写对了吗 / 预览里的文本和预期一致吗 /
+replace 模式下警示条在吗。
+
+## 已知限制
+
+| 现象 | 原因 | 缓解 |
 |---|---|---|
-| `enabled` | `true` | 总开关；`false` = 完全不注入 |
-| `mode` | `"append"` | `append` \| `replace` |
-| `default` | `""` | 兜底条目；字符串或对象均可 |
-| `byModel` | `{}` | 按模型映射；值是字符串或 `{mode,text,keepSections}` |
-| `order` | `1` | append 段的排序位置 |
-| `sectionName` | `"model-persona:main"` | 段名（同层唯一，撞了改这个） |
-| `replaceContexts` | `false` | replace 模式下是否清运行上下文 |
-| `debug` | `false` | 把本次 assembly 的段名落盘到 `last-assembly.json` 供排查 |
+| 写了关键词却没命中 | 界面显示名 ≠ 宿主真实 id；**同一个模型在不同部署下 id 前缀也会变** | 用面板下拉框选，别手打；或读 `last-model.json` 的 `model` 字段 |
+| replace 模式下模型不太会用工具 | harness 的工具使用指导段被换掉，schema 还在 | 用 `append`；或 `keepSections: ["tool:*"]` 保留工具段 |
+| 切模型会让 prefix cache 失效 | 系统提示词是请求第 0 字节，人格段变了前缀就变 | 无解，是「按模型换人格」的固有代价 |
+| 改了 JS 不生效 | Node 模块缓存 | 重启 DSH。改配置不用重启 |
+| 只覆盖安装的那个 profile | 插件挂在 profile 层 | 要对别的 profile 生效就再装一次 |
+| `/fetch` 返回 503 | 该 profile 没有可用的 `ctx.web` 服务（**本机 web profile 实测就是 503**，尽管装了 4 个搜索插件） | 在面板里手动粘贴提示词；提示词库其余功能照常 |
 
-单条条目可覆盖全局 `mode`：
+## License
 
-```jsonc
-{ "mode": "replace", "byModel": { "special": { "mode": "append", "text": "这条只追加" } } }
-```
-
-## ⚠️ replace 模式的两个已知代价
-
-1. **模型可能不会用工具了** —— harness 的工具使用指导段被替换掉了，工具 schema 还在，
-   但「什么时候该用、怎么用」的指导没了。工具少的模型影响明显。
-2. **切模型会让 prefix cache 失效** —— 系统提示词是请求第 0 字节，人格段变了前缀就变，
-   上游缓存重算。这是「按模型换人格」的固有代价，非 bug。
-
-⇒ 建议：**先只用 append 模式**，确认需要全换再对特定模型开 replace。
-
-## 安装 / 卸载
-
-用官方的 `plugin_manager` 工具（**不要手写 `cordis.patch.yml`、不要跑 pnpm**）：
-
-```
-plugin_manager({ action: "install_bundle", target: "<本仓库绝对路径>" })
-```
-
-- **临时关**：`set_plugin` 把 `model-persona-main` 置 `enabled: false`
-- **卸载**：`remove_bundle` 移除 `dsh-model-persona`
-- **改了 JS 要生效**：需重启 DSH（Node 模块缓存，官方说明如此）。改配置不用重启。
-
-## 覆盖范围
-
-挂在 profile 层，用自有段名 `model-persona:main`。
-
-- ✅ 该 profile 的所有会话（含子代理）
-- ❌ 其它 profile / headless 一次性任务（要覆盖就对该 profile 再装一次）
-
-## 目录
-
-```
-├─ index.js        宿主入口（注册段 + assemble waterfall + 面板路由接线）
-├─ core.js         纯逻辑（匹配/渲染/配置读取/replace 变换/校验/原子写），可独立测试
-├─ prompt-lib.js   提示词库 + 模型目录解析（纯逻辑）
-├─ panel-host.js   面板的 Host 数据通道（webServer 路由，零依赖）
-├─ client.js       浏览器半区（面板 UI，手写懒加载工厂，零构建）
-├─ test.mjs        回归测试
-├─ config.json     默认配置（出厂 = 不注入，零行为改变）
-├─ cordis.patch.yml 插入插件行
-├─ package.json    bundle 清单（含 dsh.client 段）
-└─ publish.ps1     一键发布自检脚本
-```
-
-## 开发
-
-```powershell
-cd <本仓库目录>
-node --check index.js
-node --check core.js
-node --check panel-host.js
-node --check client.js
-node test.mjs
-```
+MIT

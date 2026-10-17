@@ -504,6 +504,7 @@ import {
   extractFetchedPrompt,
   writeLibrary,
 } from './prompt-lib.js'
+import { registerPanelRoutes } from './panel-host.js'
 
 test('BUILTIN_PROMPTS：三条内置，id 均以 builtin- 开头', () => {
   assert.ok(Array.isArray(BUILTIN_PROMPTS))
@@ -1249,4 +1250,51 @@ test('extractFetchedPrompt：不改入参', () => {
   const snap = JSON.stringify(input)
   extractFetchedPrompt(input)
   assert.equal(JSON.stringify(input), snap)
+})
+
+// ── /fetch 的判断顺序：能力缺失必须优先于参数校验 ──────────
+// 实测踩过：传非法 URL 时先返回 400，掩盖了「本机没 ctx.web」这个真实状态。
+test('★ /fetch：无抓取服务时，即使 URL 非法也返回 503（能力缺失优先）', async () => {
+  const routes = {}
+  const ws = { register: ({ path, handler }) => { routes[path] = handler; return () => {} } }
+  registerPanelRoutes({ webServer: ws }, {
+    configPath: '/tmp/c.json', lastModelPath: '/tmp/l.json',
+    readConfig: () => ({ mode: 'append', byModel: {} }),
+    fetchPrompt: null,       // ← 本机没 ctx.web
+    warn: () => {},
+  })
+  let out = null, code = 0
+  const res = { writeHead(c) { code = c }, end(b) { out = b } }
+  const req = {
+    method: 'POST',
+    headers: { host: '127.0.0.1', 'content-type': 'application/json', 'x-model-persona': '1' },
+    url: '/model-persona/fetch',
+    on(ev, cb) { if (ev === 'data') cb(Buffer.from('{"url":"not-a-url"}')); if (ev === 'end') cb(); return this },
+    destroy() {},
+  }
+  await routes['/model-persona/fetch'](req, res)
+  assert.equal(code, 503, '应先报能力缺失（503），而不是 URL 非法（400）')
+  assert.match(JSON.parse(out).error, /ctx\.web\.fetch 不可用/)
+})
+
+test('/fetch：有服务时才校验 URL', async () => {
+  const routes = {}
+  const ws = { register: ({ path, handler }) => { routes[path] = handler; return () => {} } }
+  registerPanelRoutes({ webServer: ws }, {
+    configPath: '/tmp/c.json', lastModelPath: '/tmp/l.json',
+    readConfig: () => ({ mode: 'append', byModel: {} }),
+    fetchPrompt: async () => ({ ok: true, text: 'x' }),
+    warn: () => {},
+  })
+  let code = 0
+  const res = { writeHead(c) { code = c }, end() {} }
+  const req = {
+    method: 'POST',
+    headers: { host: '127.0.0.1', 'content-type': 'application/json', 'x-model-persona': '1' },
+    url: '/model-persona/fetch',
+    on(ev, cb) { if (ev === 'data') cb(Buffer.from('{"url":"file:///etc/passwd"}')); if (ev === 'end') cb(); return this },
+    destroy() {},
+  }
+  await routes['/model-persona/fetch'](req, res)
+  assert.equal(code, 400, '有服务时非法 URL 才该 400')
 })
