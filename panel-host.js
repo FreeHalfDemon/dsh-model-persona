@@ -93,6 +93,8 @@ export function registerPanelRoutes(scope, deps) {
     writeLibrary = () => ({ ok: true }),
     // 网上抓取提示词：调用方注入（内部用 ctx.web.fetch）。null = 本机没这能力
     fetchPrompt = null,
+    // 懒拉取模型目录：目录为空时 /state 现拉一次（加载期拉往往还没就绪）
+    refreshCatalog = null,
     warn = () => {},
   } = deps
 
@@ -131,6 +133,15 @@ export function registerPanelRoutes(scope, deps) {
             model = String(JSON.parse(readFileSync(lastModelPath, 'utf8')).model || '')
           } catch {
             model = ''
+          }
+          // 目录为空就现拉一次：插件加载期 providers 常还没注册完，
+          // 真环境实测那一刻拿到的是空目录（catalogError: 目录为空）。
+          if (typeof refreshCatalog === 'function' && !(modelCatalog.models || []).length) {
+            try {
+              await refreshCatalog()
+            } catch {
+              /* 拉不到就用空目录 + 手贴入口 */
+            }
           }
           sendJson(res, 200, {
             ok: true,

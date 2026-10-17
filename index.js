@@ -142,29 +142,54 @@ export function apply(ctx) {
     }
   }
 
+  // 持有服务引用，供**懒拉取**用（见下方 refreshCatalog）
+  let sessionControllerSvc = null
+
   try {
     ctx.inject(['sessionController'], (scope) => {
-      try {
-        const svc = scope && scope.sessionController
-        if (!svc || typeof svc.modelCatalog !== 'function') {
-          warn(`${LOG} 拿不到 sessionController.modelCatalog，模型下拉框将依赖手贴目录`)
-          return
-        }
-        // 可能是 Promise；失败只 warn，绝不影响人格注入
-        Promise.resolve()
-          .then(() => svc.modelCatalog())
-          .then((cat) => applyCatalog(cat, 'service'))
-          .catch((e) => {
-            modelCatalog.error = (e && e.message) || String(e)
-            warn(`${LOG} modelCatalog() 调用失败（下拉框不可用）：${modelCatalog.error}`)
-          })
-      } catch (e) {
-        warn(`${LOG} 读取模型目录失败（下拉框不可用）：${(e && e.message) || e}`)
-      }
+      const svc = scope && scope.sessionController
+      if (svc && typeof svc.modelCatalog === 'function') sessionControllerSvc = svc
+      else warn(`${LOG} 拿不到 sessionController.modelCatalog，模型下拉框将依赖手贴目录`)
     })
   } catch (e) {
     warn(`${LOG} 注入 sessionController 失败（下拉框不可用）：${(e && e.message) || e}`)
   }
+
+  /**
+   * 懒拉取模型目录。
+   *
+   * ⚠️ 为什么不在注入回调里只拉一次（v4 初版的做法，实测失败）：
+   *   `ctx.inject` 回调在插件**加载期**就跑，那时 llm provider 往往还没注册完，
+   *   `modelCatalog()` 返回空 providers → 目录永远是空的。
+   *   真环境实测：catalogSource=none、catalogError=目录为空、models=0。
+   *
+   * 改为「首次需要时拉 + 成功后缓存 + 失败可重试」：
+   *   · 面板读 /state 时若目录为空就现拉一次
+   *   · 拿到非空就缓存，不再重复调（服务返回的是完整快照，不随会话变）
+   *   · 拿不到就让面板显示手贴入口，不影响人格注入
+   */
+  let catalogInFlight = null
+  const refreshCatalog = async ({ force = false } = {}) => {
+    if (!sessionControllerSvc) return modelCatalog
+    if (!force && modelCatalog.models.length) return modelCatalog
+    if (catalogInFlight) return catalogInFlight
+    catalogInFlight = (async () => {
+      try {
+        const cat = await sessionControllerSvc.modelCatalog()
+        applyCatalog(cat, 'service')
+      } catch (e) {
+        modelCatalog.error = (e && e.message) || String(e)
+        warn(`${LOG} modelCatalog() 调用失败（下拉框不可用）：${modelCatalog.error}`)
+      } finally {
+        catalogInFlight = null
+      }
+      return modelCatalog
+    })()
+    return catalogInFlight
+  }
+
+  // 启动时先试一次（多数情况下此刻已就绪，就省掉第一次面板请求的等待）
+  Promise.resolve().then(() => refreshCatalog()).catch(() => {})
 
   /**
    * ⑥ 网上抓取提示词（v4）。可选依赖 ctx.web —— 它是**可选服务**：
@@ -318,6 +343,7 @@ export function apply(ctx) {
           readLibrary,
           writeLibrary,
           fetchPrompt,
+          refreshCatalog,
           warn,
         })
         scope.effect(() => dispose, 'dsh-model-persona.panel-routes()')
